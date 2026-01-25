@@ -1,0 +1,47 @@
+{
+  "system_info": {
+    "name": "Kundur Two-Area System",
+    "description": "4-machine 2-area test system for transient stability",
+    "base_power_mva": 100.0,
+    "base_frequency_hz": 60.0
+  },
+  "simulation": {
+    "t_end": 15.0,
+    "dt": 0.001,
+    "fault_config": {
+      "enabled": true,
+      "bus_idx": 3,
+      "fault_start": 1.0,
+      "fault_end": 1.1,
+      "fault_impedance": 0.005
+    }
+  },
+  "component_connections": {
+    "generators": [
+      {
+        "gen_idx": 1,
+        "exciter_idx": 1,
+        "governor_idx": 1,
+        "bus": 1
+      },
+      {
+        "gen_idx": 2,
+        "exciter_idx": 2,
+        "governor_idx": 2,
+        "bus": 2
+      },
+      {
+        "gen_idx": 3,
+        "exciter_idx": 3,
+        "governor_idx": 3,
+        "bus": 3
+      },
+      {
+        "gen_idx": 4,
+        "exciter_idx": 4,
+        "governor_idx": 4,
+        "bus": 4
+      }
+    ]
+  }
+}

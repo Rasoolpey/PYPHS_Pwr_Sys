@@ -1,0 +1,81 @@
+"""Standalone PyPHS-compatible Core class"""
+import sympy as sp
+
+
+class Core:
+    """Minimal PyPHS Core implementation for power systems"""
+    
+    def __init__(self, label='system'):
+        self.label = label
+        self.x = []  # State variables
+        self.w = []  # Dissipative variables
+        self.z = []  # Dissipation functions
+        self.u = []  # Input ports
+        self.y = []  # Output ports
+        self.H = 0   # Hamiltonian
+        self.subs = {}  # Parameter substitutions
+    
+    def symbols(self, names):
+        """Create sympy symbols (real-valued)"""
+        if isinstance(names, str):
+            return sp.Symbol(names, real=True)
+        elif isinstance(names, list):
+            return [sp.Symbol(name, real=True) for name in names]
+        else:
+            return sp.symbols(names, real=True)
+    
+    def add_storages(self, states, hamiltonian):
+        """Add storage components
+        
+        Args:
+            states: list of state variables or single state
+            hamiltonian: energy function
+        """
+        if not isinstance(states, list):
+            states = [states]
+        self.x.extend(states)
+        self.H += hamiltonian
+    
+    def add_dissipations(self, w_vars, z_funcs):
+        """Add dissipative components
+        
+        Args:
+            w_vars: list of dissipative variables or single variable
+            z_funcs: list of dissipation functions or single function
+        """
+        if not isinstance(w_vars, list):
+            w_vars = [w_vars]
+        if not isinstance(z_funcs, list):
+            z_funcs = [z_funcs]
+        self.w.extend(w_vars)
+        self.z.extend(z_funcs)
+    
+    def add_ports(self, inputs, outputs):
+        """Add external ports
+        
+        Args:
+            inputs: list of input port variables
+            outputs: list of output port variables
+        """
+        if not isinstance(inputs, list):
+            inputs = [inputs]
+        if not isinstance(outputs, list):
+            outputs = [outputs]
+        self.u.extend(inputs)
+        self.y.extend(outputs)
+    
+    def dxH(self):
+        """Compute gradient of Hamiltonian"""
+        return [sp.diff(self.H, xi) for xi in self.x]
+    
+    def __add__(self, other):
+        """Combine two cores"""
+        combined = Core(label=f'{self.label}_{other.label}')
+        combined.x = self.x + other.x
+        combined.w = self.w + other.w
+        combined.z = self.z + other.z
+        combined.u = self.u + other.u
+        combined.y = self.y + other.y
+        combined.H = self.H + other.H
+        combined.subs = {**self.subs, **other.subs}
+        return combined
