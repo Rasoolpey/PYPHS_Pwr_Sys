@@ -258,7 +258,7 @@ class ModularFaultSimulator:
             print("Success!")
         return sol
     
-    def plot_results(self, sol):
+    def plot_results(self, sol, filename='fault_simulation.png'):
         """Plot results"""
         x_hist = sol.y.T.reshape(-1, self.n_gen, self.states_per_machine)
         t = sol.t
@@ -320,7 +320,7 @@ class ModularFaultSimulator:
         
         output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'outputs')
         os.makedirs(output_dir, exist_ok=True)
-        output_path = os.path.join(output_dir, 'fault_simulation.png')
+        output_path = os.path.join(output_dir, filename)
         plt.savefig(output_path, dpi=150)
         print(f"\nPlot saved: {output_path}")
         plt.show()
