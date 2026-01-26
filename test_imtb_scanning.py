@@ -15,11 +15,11 @@ def main():
     scanner = IMTBScanner('test_cases/Kundur_System/kundur_full.json')
     
     # Range
-    freqs = np.logspace(-1, 1.7, 30) 
+    freqs = np.logspace(-1, 2.48, 50) 
     
     # Run with increased injection amplitude to see controller response
     f_vec, Z_mimo = scanner.run_mimo_scan(bus_idx=2, freqs_hz=freqs, 
-                                          duration=10.0, amplitude=0.10)
+                                          duration=20.0, amplitude=0.10)
     
     # --- PRINT DETAILED RESULTS ---
     print("\n" + "="*80)
