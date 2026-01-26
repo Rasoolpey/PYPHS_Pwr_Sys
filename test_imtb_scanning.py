@@ -17,9 +17,9 @@ def main():
     # Range
     freqs = np.logspace(-1, 1.7, 30) 
     
-    # Run
+    # Run with increased injection amplitude to see controller response
     f_vec, Z_mimo = scanner.run_mimo_scan(bus_idx=2, freqs_hz=freqs, 
-                                          duration=10.0, amplitude=0.02)
+                                          duration=10.0, amplitude=0.10)
     
     # --- PRINT DETAILED RESULTS ---
     print("\n" + "="*80)
