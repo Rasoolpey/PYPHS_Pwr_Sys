@@ -51,25 +51,56 @@ def main():
     
     # 6. Plot Results
     print("\nPlotting results...")
-    
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
-    
-    # Magnitude Plot
-    # Plotting dd and qq axis impedances
-    ax1.loglog(f, np.abs(Z_dq[:, 0, 0]), 'b-', label='Z_dd (d-axis)', linewidth=2)
-    ax1.loglog(f, np.abs(Z_dq[:, 1, 1]), 'r--', label='Z_qq (q-axis)', linewidth=2)
-    ax1.set_ylabel('Magnitude (Ohm/pu)')
-    ax1.set_title(f'Impedance Spectrum at {target_bus["name"]}')
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    # Compute positive-sequence impedance
+    Z_dd = Z_dq[:, 0, 0]
+    Z_qq = Z_dq[:, 1, 1]
+    Z_dq_cross = Z_dq[:, 0, 1]  # d to q coupling
+    Z_qd_cross = Z_dq[:, 1, 0]  # q to d coupling (main reactive term)
+    Z_pos = (Z_dd + Z_qq)/2 + 1j*(Z_qd_cross - Z_dq_cross)/2
+
+    # Plot 1: Self-impedances (diagonal terms)
+    ax1 = axes[0, 0]
+    ax1.loglog(f, np.abs(Z_dd), 'b-', label='|Z_dd| (d-axis self)', linewidth=2)
+    ax1.loglog(f, np.abs(Z_qq), 'r--', label='|Z_qq| (q-axis self)', linewidth=2)
+    ax1.set_ylabel('Magnitude (pu)')
+    ax1.set_title('Self-Impedances (Diagonal)')
     ax1.grid(True, which="both", ls="-", alpha=0.4)
     ax1.legend()
-    
-    # Phase Plot
-    ax2.semilogx(f, np.degrees(np.angle(Z_dq[:, 0, 0])), 'b-', label='Z_dd', linewidth=2)
-    ax2.semilogx(f, np.degrees(np.angle(Z_dq[:, 1, 1])), 'r--', label='Z_qq', linewidth=2)
-    ax2.set_ylabel('Phase (degrees)')
-    ax2.set_xlabel('Frequency (Hz)')
+
+    # Plot 2: Cross-coupling impedances (off-diagonal terms)
+    ax2 = axes[0, 1]
+    ax2.loglog(f, np.abs(Z_qd_cross), 'g-', label='|Z_qd| (d->q, ~Xd)', linewidth=2)
+    ax2.loglog(f, np.abs(Z_dq_cross), 'm--', label='|Z_dq| (q->d, ~Xq)', linewidth=2)
+    ax2.set_ylabel('Magnitude (pu)')
+    ax2.set_title('Cross-Coupling Impedances (Off-Diagonal)')
     ax2.grid(True, which="both", ls="-", alpha=0.4)
     ax2.legend()
+
+    # Plot 3: Positive-sequence impedance magnitude
+    ax3 = axes[1, 0]
+    ax3.loglog(f, np.abs(Z_pos), 'k-', label='|Z_pos|', linewidth=2)
+    ax3.loglog(f, Z_mag, 'b--', label='|Z| (from scanner)', linewidth=1.5, alpha=0.7)
+    ax3.set_ylabel('Magnitude (pu)')
+    ax3.set_xlabel('Frequency (Hz)')
+    ax3.set_title('Positive-Sequence Impedance')
+    ax3.grid(True, which="both", ls="-", alpha=0.4)
+    ax3.legend()
+
+    # Plot 4: Positive-sequence phase
+    ax4 = axes[1, 1]
+    ax4.semilogx(f, np.degrees(np.angle(Z_pos)), 'k-', label='Phase(Z_pos)', linewidth=2)
+    ax4.semilogx(f, np.degrees(np.angle(Z_qd_cross)), 'g--', label='Phase(Z_qd)', linewidth=1.5, alpha=0.7)
+    ax4.set_ylabel('Phase (degrees)')
+    ax4.set_xlabel('Frequency (Hz)')
+    ax4.set_title('Phase Response')
+    ax4.grid(True, which="both", ls="-", alpha=0.4)
+    ax4.legend()
+
+    fig.suptitle(f'DQ Impedance Analysis at {target_bus["name"]}', fontsize=14)
+    plt.tight_layout()
     
     # Create outputs directory if it doesn't exist
     import os
