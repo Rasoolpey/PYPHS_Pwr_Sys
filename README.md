@@ -333,6 +333,8 @@ The framework uses a clean separation of concerns with each module handling spec
 - Small-signal linearization around operating point
 - State-space model extraction (A, B, C, D matrices)
 - Transfer function analysis: Z(s) = C(sI-A)^(-1)B + D
+- **Includes saturation**: Linearizes around saturated equilibrium state
+- **Proper D-matrix**: Captures immediate network impedance response
 - Fast computation (no time simulation)
 - Best for: Initial design, small perturbations, smooth Bode plots
 
@@ -400,7 +402,7 @@ The framework provides **three complementary impedance scanning methods**, each 
 | **Amplitude** | Infinitesimal (ε=10⁻⁵) | 0.01-0.10 pu | 0.001-0.10 pu |
 | **Nonlinearity** | ❌ Linear only | ✓ Partial (saturation) | ✓ Full nonlinear |
 | **MIMO** | ✓ 2×2 dq matrix | ✓ 2×2 dq matrix | Single complex Z |
-| **Saturation** | ❌ Ignored | ✓ Included | ✓ Included |
+| **Saturation** | ✓ Included (linearized) | ✓ Included | ✓ Included |
 | **Noise** | None (analytical) | Low (DFT) | Medium (needs averaging) |
 | **Best For** | Initial design | Controller tuning | Validation testing |
 
@@ -416,9 +418,9 @@ The framework provides **three complementary impedance scanning methods**, each 
 - ✓ Extremely fast (no time simulation required)
 - ✓ Smooth, analytical Bode plots
 - ✓ Full MIMO dq impedance matrix
-- ❌ Only valid for small perturbations (linear regime)
-- ❌ Ignores exciter/governor saturation limits
-- ❌ D-matrix ≈ 0 (missing immediate network response)
+- ✓ **Now includes exciter/governor saturation** (linearized around saturated state)
+- ✓ **Proper D-matrix computation** (captures immediate network response)
+- ⚠ Only valid for small perturbations (linear regime around operating point)
 
 **Use Cases:**
 - Initial system design and controller tuning
@@ -427,6 +429,9 @@ The framework provides **three complementary impedance scanning methods**, each 
 - Academic studies requiring linearized models
 
 **Example Output:** Smooth impedance curves from 0.1 Hz to 100+ Hz
+- Low frequency: High impedance (100-10000 pu) due to voltage control
+- Mid frequency: Decreasing impedance as AVR bandwidth is exceeded
+- High frequency: Settles to electrical impedance (~0.5-1.0 pu)
 
 ### Method 2: IMTB Multisine Scanner
 
@@ -548,10 +553,13 @@ amplitude = 0.01      # Injection amplitude (pu) - test different levels
 
 **Stability Improvements Applied:**
 - Fixed xd'' scaling bug (0.25 pu machine → 0.0278 pu system for 100/900 MVA)
-- Added exciter anti-windup (prevents runaway to 117 pu)
+- Added exciter anti-windup (prevents runaway to 117 pu) - **all methods**
+- Added governor saturation limits - **all methods**
 - Corrected network solver iterations (3 → 2 with safety check)
 - Fixed governor/exciter reference handling
 - Corrected diagnostic array reshaping (sol.y vs sol.y.T)
+- **Proper D-matrix computation in frequency-domain method** (captures network impedance)
+- **Iterative power flow trim for all methods** (consistent equilibrium initialization)
 
 **Signal Monitoring (Time-Domain Only):**
 ```python
@@ -787,6 +795,12 @@ The modular architecture enables easy addition of:
 
 ### Impedance Scanning Tips
 
+**Method Selection Updates (v1.1):**
+- **Frequency-Domain scanner now improved**: Includes saturation and proper D-matrix
+- All three methods now use consistent equilibrium initialization
+- Frequency-domain results should be closer to IMTB/TD at low frequencies
+- D-matrix now captures network impedance at infinite frequency (algebraic path)
+
 **Frequency Range Selection:**
 - Governor dynamics: 0.1 - 10 Hz
 - AVR/Exciter dynamics: 5 - 50 Hz
@@ -818,6 +832,8 @@ The modular architecture enables easy addition of:
 - **Controller bandwidth:** -3dB point or phase crossover
 - **Saturation:** Impedance decreases with amplitude
 - **Discrepancies between methods:** Indicates nonlinearity
+- **High impedance at low frequencies:** Normal for voltage-controlled generators (AVR keeps V constant)
+- **Expected values:** DC: 100-10000 pu, 10 Hz: 1-100 pu, 100 Hz: 0.3-1.0 pu
 
 ### Troubleshooting
 
@@ -841,6 +857,12 @@ The modular architecture enables easy addition of:
 - Frequency-domain = linear baseline
 - IMTB/Time-domain = realistic behavior with saturation
 - Large differences indicate strong nonlinearity
+
+**"Impedance values seem too large":**
+- High impedance at low frequencies (<1 Hz) is correct for voltage-controlled generators
+- AVR maintains constant voltage → Z = V/I appears very large
+- Should decrease with frequency and settle to electrical impedance at high freq
+- If high freq impedance >10 pu, check D-matrix computation or scaling
 
 ## Contributing
 

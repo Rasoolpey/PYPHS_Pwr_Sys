@@ -43,42 +43,207 @@ class ImpedanceScanner:
 
     def find_equilibrium(self):
         """
-        Calculates the steady-state operating point x0.
-        (Simplified version of the logic in fault_sim_modular)
+        Find equilibrium using iterative power flow trim (same as fault_sim_modular).
         """
-        print("Computing equilibrium point...")
-        # 1. Initialize guesses
+        print("Computing equilibrium point (iterative trim)...")
+        
+        # Target active powers and initial guesses
+        P_targets = np.array([7.459, 7.0, 7.0, 7.0])
         delta_init = np.array([0.08, 0.07, 0.06, 0.07])
         psi_f_init = np.array([1.3, 1.3, 1.3, 1.3])
         
-        # 2. Iterative solve (Simplified for brevity, assuming stability)
-        # In a real tool, we would copy the robust solver from fault_sim_modular
+        # Iterative trim loop (matching fault_sim_modular)
+        for iteration in range(100):  # Increase iterations
+            gen_states = np.zeros((self.n_gen, 7))
+            for i in range(self.n_gen):
+                M = self.builder.gen_metadata[i]['M']
+                gen_states[i] = [delta_init[i], M * 1.0, 0.0, 0.0, psi_f_init[i], 0.0, 0.0]
+            
+            Id, Iq, Vd, Vq = self.coordinator.solve_network(gen_states)
+            P_calc = Vd * Id + Vq * Iq
+            V_mag = np.sqrt(Vd**2 + Vq**2)
+            
+            max_error = 0
+            for i in range(self.n_gen):
+                # Adjust delta to match power
+                P_error = P_targets[i] - P_calc[i]
+                delta_init[i] += 0.02 * P_error
+                
+                # Adjust field flux to match voltage
+                V_error = 1.0 - V_mag[i]
+                psi_f_init[i] += 0.1 * V_error
+                psi_f_init[i] = np.clip(psi_f_init[i], 0.5, 2.0)
+                
+                max_error = max(max_error, abs(P_error))
+            
+            if iteration % 10 == 0:
+                print(f"  Iter {iteration}: P_error={max_error:.5f}")
+            
+            converged = max_error < 1e-4
+            if converged:
+                print(f"  Converged in {iteration+1} iterations")
+                break
+        
+        if not converged:
+            print(f"  WARNING: Did not fully converge (error={max_error:.6f})")
+        
+        # Build complete state vector (matching fault_sim_modular)
         x0 = np.zeros((self.n_gen, self.states_per_machine))
-        
-        # ... (Using a fast-forward approximation for the scanner demo)
-        # We need the exact equilibrium to linearize correctly.
-        # Let's perform a quick settling simulation to find x0
-        
-        def settling_dynamics(t, x):
-            return self._dynamics_wrapper(x, perturbation=None)
-
-        from scipy.integrate import solve_ivp
-        
-        # Initial rough guess
-        for i in range(4):
+        for i in range(self.n_gen):
+            meta = self.builder.gen_metadata[i]
+            omega_b = meta['omega_b']
+            M = meta['M']
+            ra = meta['ra']
+            
+            # Calculate psi_d and psi_q from network solution
+            psi_q = (-Vd[i] - ra * Id[i]) / omega_b
+            psi_d = (Vq[i] + ra * Iq[i]) / omega_b
+            
             x0[i, 0] = delta_init[i]
-            x0[i, 1] = self.builder.gen_metadata[i]['M'] # omega=1
-            x0[i, 4] = psi_f_init[i] # psi_f
-            x0[i, 7] = 1.0 # Vm
-            x0[i, 8] = psi_f_init[i] # Efd approx
-            x0[i, 11] = 7.0 # P_mech
-            x0[i, 12] = 7.0 # P_mech
-
-        # Simulate briefly to settle
-        sol = solve_ivp(settling_dynamics, (0, 5.0), x0.flatten(), method='RK45')
-        self.x0 = sol.y[:, -1]
+            x0[i, 1] = M * 1.0
+            x0[i, 2] = psi_d
+            x0[i, 3] = psi_q
+            x0[i, 4] = psi_f_init[i]
+            x0[i, 5] = 0.0
+            x0[i, 6] = 0.0
+            x0[i, 7] = np.sqrt(Vd[i]**2 + Vq[i]**2)  # Vm
+            x0[i, 8] = psi_f_init[i]  # Efd = psi_f at equilibrium
+            
+            # Clip Efd to saturation limits
+            exc_m = self.builder.exc_metadata[i]
+            VRMAX = exc_m.get('VRMAX', 5.2)
+            VRMIN = exc_m.get('VRMIN', -4.16)
+            x0[i, 8] = np.clip(x0[i, 8], VRMIN, VRMAX)
+            
+            x0[i, 9] = 0.0  # vr2
+            x0[i, 10] = 0.0  # vf
+            
+            # Governor states - use actual calculated power at equilibrium
+            P_eq = P_calc[i]
+            x0[i, 11] = P_eq  # x1 (gate position)
+            x0[i, 12] = P_eq  # x2
+            
+            # Update governor metadata with equilibrium power
+            self.builder.gov_metadata[i]['Pref'] = P_eq
+        
+        # Verify stability with short simulation
+        from scipy.integrate import solve_ivp
+        sol = solve_ivp(lambda t, x: self._dynamics_wrapper(x, perturbation=None),
+                       (0, 5.0), x0.flatten(), method='RK45')
+        
+        x_final = sol.y[:, -1].reshape(self.n_gen, 13)
+        delta_drift = np.rad2deg(np.max(np.abs(x_final[:, 0] - x0[:, 0])))
+        print(f"  Equilibrium stability check: Δδ = {delta_drift:.2f}° over 5s")
+        
+        if delta_drift > 3.0:
+            print("  WARNING: Equilibrium may be unstable!")
+        
+        self.x0 = x0.flatten()
         print("Equilibrium found.")
         return self.x0
+
+    def _solve_network_with_injection_v2(self, gen_states, target_bus, Id_inj, Iq_inj):
+        """
+        Network solver with current injection support for D-matrix computation.
+        Based on IMTB scanner implementation.
+        """
+        Ybus = self.coordinator.Ybus_base
+        
+        # Generator internal voltage sources (corrected xd2 scaling)
+        Y_gen_diag = np.zeros(self.n_gen, dtype=complex)
+        E_sys = np.zeros(self.n_gen, dtype=complex)
+        
+        for i in range(self.n_gen):
+            meta = self.builder.gen_metadata[i]
+            gen_core = self.builder.generators[i]
+            
+            delta = gen_states[i, 0]
+            psi_d, psi_q, psi_f, psi_kd, psi_kq = gen_states[i, 2:7]
+            
+            # Extract parameters
+            xd2_machine = self._extract_param(gen_core, 'xd2', 0.25)
+            xq2_machine = self._extract_param(gen_core, 'xq2', 0.25)
+            
+            # CRITICAL: Scale from machine base to system base
+            Sn = meta['Sn']
+            S_system = self.builder.S_system
+            xd2 = xd2_machine * (Sn / S_system)
+            xq2 = xq2_machine * (Sn / S_system)
+            
+            # Machine inductance matrix (dq frame)
+            xd = self._extract_param(gen_core, 'xd', 1.8)
+            xq = self._extract_param(gen_core, 'xq', 1.7)
+            
+            Ld_eq = (xd * psi_f + xd2 * psi_kd) / (xd + xd2)
+            Lq_eq = (xq * psi_kq) / (xq + xq2) if abs(xq + xq2) > 1e-9 else 0.0
+            
+            psi2d = psi_d - Ld_eq
+            psi2q = psi_q - Lq_eq
+            
+            # Equivalent generator impedance
+            y_gen_dq = (1.0 / (xd2 + 1j * xq2))
+            Y_gen_diag[i] = y_gen_dq
+            
+            # Internal voltage in network frame
+            E_int = psi2d + 1j * psi2q
+            E_sys[i] = (np.real(E_int) * np.cos(delta) - np.imag(E_int) * np.sin(delta)) + \
+                       1j * (np.real(E_int) * np.sin(delta) + np.imag(E_int) * np.cos(delta))
+        
+        # Current injection in network frame
+        I_gen_source = E_sys * Y_gen_diag
+        S_load = self.coordinator.load_P + 1j * self.coordinator.load_Q
+        V_term = np.ones(self.n_gen, dtype=complex)
+        Y_total = Ybus + np.diag(Y_gen_diag)
+        
+        I_inj_net_complex = 0j
+        if target_bus >= 0:
+            delta_target = gen_states[target_bus, 0]
+            # Transform dq injection to network frame
+            I_inj_net_complex = (Id_inj * np.cos(delta_target) - Iq_inj * np.sin(delta_target)) + \
+                                1j * (Id_inj * np.sin(delta_target) + Iq_inj * np.cos(delta_target))
+        
+        # Two-iteration network solve (matching SystemCoordinator)
+        I_load = np.conj(S_load / V_term)
+        I_rhs = I_gen_source - I_load
+        if target_bus >= 0:
+            I_rhs[target_bus] += I_inj_net_complex
+        V_term = np.linalg.solve(Y_total, I_rhs)
+        
+        # Refine with voltage safety clamping
+        V_safe = np.where(np.abs(V_term) > 0.5, V_term, np.ones(self.n_gen, dtype=complex))
+        I_load = np.conj(S_load / V_safe)
+        I_rhs = I_gen_source - I_load
+        if target_bus >= 0:
+            I_rhs[target_bus] += I_inj_net_complex
+        V_term = np.linalg.solve(Y_total, I_rhs)
+        
+        # Generator output current
+        I_out = (E_sys - V_term) * Y_gen_diag
+        
+        # Transform to dq frame
+        Vd = np.zeros(self.n_gen)
+        Vq = np.zeros(self.n_gen)
+        Id = np.zeros(self.n_gen)
+        Iq = np.zeros(self.n_gen)
+        
+        for i in range(self.n_gen):
+            delta = gen_states[i, 0]
+            v_r, v_i = np.real(V_term[i]), np.imag(V_term[i])
+            i_r, i_i = np.real(I_out[i]), np.imag(I_out[i])
+            
+            Vd[i] = v_r * np.cos(delta) + v_i * np.sin(delta)
+            Vq[i] = -v_r * np.sin(delta) + v_i * np.cos(delta)
+            Id[i] = i_r * np.cos(delta) + i_i * np.sin(delta)
+            Iq[i] = -i_r * np.sin(delta) + i_i * np.cos(delta)
+        
+        return Vd, Vq, Id, Iq
+    
+    def _extract_param(self, component_core, param_name, default_value):
+        """Extract parameter from component's substitution dictionary"""
+        for key, value in component_core.subs.items():
+            if param_name in str(key):
+                return float(value)
+        return default_value
 
     def _dynamics_wrapper(self, x_flat, perturbation=None):
         """
@@ -93,67 +258,27 @@ class ImpedanceScanner:
         exc_states = x[:, 7:11]
         gov_states = x[:, 11:13]
         
-        # 1. Network Solve (Modified for Injection)
-        # We need to monkey-patch or modify the coordinator solve to accept I_inj
-        # Since coordinator.solve_network is hardcoded, we calculate the injection effect manually here:
-        # I_inj affects the current balance equation: Y V = I_gen + I_inj - I_load
-        
-        # Standard solve first
-        Id, Iq, Vd, Vq = self.coordinator.solve_network(gen_states)
-        
-        # Apply Perturbation Superposition (Linear approximation for Jacobian)
-        # If we inject current at a bus, Voltage rises by Z_thevenin * I_inj
-        # Note: Ideally, we pass I_inj into solve_network. 
-        # For this scanner, we assume the perturbation is small and handled via
-        # the numerical differentiation of the CLOSED LOOP system.
-        
-        # HOWEVER, to get the 'B' matrix (Input -> State), we strictly need 
-        # to inject current.
-        
+        # Network Solve with optional current injection
         if perturbation:
-            # We must modify the voltages Vd, Vq based on the injection.
-            # This requires the inverse Ybus (Zbus).
-            # V_new = V_old + Zbus * I_inj
-            
-            # Reconstruct full complex arrays
             bus_idx = perturbation['bus_idx']
-            I_inj_complex = np.zeros(4, dtype=complex)
-            # perturbation current in machine frame needs rotation to network frame?
-            # For simplicity in impedance scanning, we often scan in the synchronous frame (dq).
-            # Let's assume the injection is in the Network Frame (easier) or Machine Frame.
-            # Let's inject in the Machine Frame of the target bus.
-            
-            delta = gen_states[bus_idx, 0]
-            i_d = perturbation.get('Id_inj', 0)
-            i_q = perturbation.get('Iq_inj', 0)
-            
-            # Current injection vector
-            # This is a simplification. For rigorous PHS, we should inject at the port.
-            # Vd[bus_idx] += i_d * R_dummy # This is just a dummy change to detect sensitivity
-            # To do this correctly without rewriting coordinator, we accept Vd, Vq as "Inputs" 
-            # for the partial derivative B matrix, and then close the loop with Z_network.
-            pass
+            Id_inj = perturbation.get('Id_inj', 0.0)
+            Iq_inj = perturbation.get('Iq_inj', 0.0)
+            Vd, Vq, Id, Iq = self._solve_network_with_injection_v2(gen_states, bus_idx, Id_inj, Iq_inj)
+        else:
+            Id, Iq, Vd, Vq = self.coordinator.solve_network(gen_states)
 
-        # ... (Rest of dynamics calculation identical to fault_sim_modular)
+        # Dynamics calculation
         dxdt = np.zeros((self.n_gen, self.states_per_machine))
         
-        # Re-implementing core physics for derivative calculation
-        # (Ideally this should be a shared method in a physics module)
         for i in range(self.n_gen):
             meta = self.builder.gen_metadata[i]
             gen_core = self.builder.generators[i]
             
-            # Current injection handling for B-matrix calculation
-            # If we are perturbing the CURRENT at this bus, we modify Id/Iq seen by the generator
-            id_val = Id[i]
-            iq_val = Iq[i]
-            
-            if perturbation and perturbation['bus_idx'] == i:
-                 id_val += perturbation.get('Id_inj', 0)
-                 iq_val += perturbation.get('Iq_inj', 0)
-
+            # Get voltages and currents for this generator
             vd_val = Vd[i]
             vq_val = Vq[i]
+            id_val = Id[i]
+            iq_val = Iq[i]
             
             # --- Generator Physics ---
             M = meta['M']
@@ -197,14 +322,31 @@ class ImpedanceScanner:
             
             dxdt[i, 7] = (Vt - vm) / TR
             Verr = Vref - vm
+            
+            # CRITICAL FIX: Add exciter saturation (linearize around saturated state)
+            exc_meta = self.builder.exc_metadata[i]
+            VRMAX = exc_meta.get('VRMAX', 5.2)
+            VRMIN = exc_meta.get('VRMIN', -4.16)
+            
             vr1_unlimited = (KA * Verr - vr1) / TA
-            dxdt[i, 8] = vr1_unlimited # Ignoring limits for linearization
+            
+            # Anti-windup saturation logic
+            if vr1 >= VRMAX and vr1_unlimited > 0:
+                dxdt[i, 8] = 0.0  # Saturated high, no further increase
+            elif vr1 <= VRMIN and vr1_unlimited < 0:
+                dxdt[i, 8] = 0.0  # Saturated low, no further decrease
+            else:
+                dxdt[i, 8] = vr1_unlimited
+            
             dxdt[i, 9] = 0.0
             dxdt[i, 10] = 0.0
             
             # --- Governor Dynamics ---
             gate_cmd = gov_meta['Pref'] + (gov_meta['wref'] - omega) / gov_meta['R']
-            dxdt[i, 11] = 10.0 * (gate_cmd - x1) / gov_meta['T1']
+            
+            # Add governor saturation limits
+            gate_limited = np.clip(gate_cmd, gov_meta.get('VMIN', 0.0), gov_meta.get('VMAX', 10.0))
+            dxdt[i, 11] = 10.0 * (gate_limited - x1) / gov_meta['T1']
             dxdt[i, 12] = 10.0 * (x1 - x2) / gov_meta['T3']
             
         return dxdt.flatten()
@@ -267,16 +409,34 @@ class ImpedanceScanner:
             y_p = np.array([Vd_p[bus_idx], Vq_p[bus_idx]])
             C[:, i] = (y_p - y0) / epsilon
             
-        # Perturb inputs for D
-        # Note: Since network is algebraic, D represents the immediate change in V due to I
-        # This is essentially the Thevenin impedance of the network itself at infinite frequency
-        # For this simplified model, we can approximate D by checking V changes without state changes
-        # However, solve_network assumes I_gen determines V. If we inject current, V changes immediately.
-        # D ~ Z_thevenin
+        # Perturb inputs for D - FIX: Properly compute D-matrix
+        # D represents immediate voltage change due to current injection (algebraic path)
+        # D = dV/dI at constant states (network impedance)
         
-        # Since solve_network doesn't natively support I_inj, D is effectively 0 in this specific code structure
-        # (Voltages only change if states change). 
-        # A more advanced implementation would invert Ybus to find D.
+        # Method: Numerically perturb current injection and measure voltage change
+        # while keeping all states constant (algebraic network response only)
+        
+        # We need a modified network solver that accepts current injection
+        # Use the same approach as IMTB scanner
+        
+        # Perturb Id injection (keep states fixed at x0)
+        Vd_baseline, Vq_baseline, _, _ = self._solve_network_with_injection_v2(
+            gen_states, bus_idx, 0.0, 0.0)
+        Vd_pert_id, Vq_pert_id, _, _ = self._solve_network_with_injection_v2(
+            gen_states, bus_idx, epsilon, 0.0)
+        
+        D[0, 0] = (Vd_pert_id[bus_idx] - Vd_baseline[bus_idx]) / epsilon  # dVd/dId
+        D[1, 0] = (Vq_pert_id[bus_idx] - Vq_baseline[bus_idx]) / epsilon  # dVq/dId
+        
+        # Perturb Iq injection (keep states fixed at x0)
+        Vd_pert_iq, Vq_pert_iq, _, _ = self._solve_network_with_injection_v2(
+            gen_states, bus_idx, 0.0, epsilon)
+        
+        D[0, 1] = (Vd_pert_iq[bus_idx] - Vd_baseline[bus_idx]) / epsilon  # dVd/dIq
+        D[1, 1] = (Vq_pert_iq[bus_idx] - Vq_baseline[bus_idx]) / epsilon  # dVq/dIq
+        
+        print(f"  D-matrix computed (network impedance at infinite frequency):")
+        print(f"    D = {D}")
         
         return A, B, C, D
 
@@ -318,6 +478,14 @@ class ImpedanceScanner:
         # Z_pos approx (Zdd + Zqq)/2 + j(Zdq - Zqd)/2
         Z_dd = Z_dq[:, 0, 0]
         Z_qq = Z_dq[:, 1, 1]
+        
+        # Print some diagnostic values
+        print(f"\n  Impedance Diagnostics:")
+        print(f"    DC (0.1 Hz): |Z_dd| = {np.abs(Z_dd[0]):.2f} pu")
+        mid_idx = len(freq_range_hz) // 2
+        print(f"    Mid ({freq_range_hz[mid_idx]:.1f} Hz): |Z_dd| = {np.abs(Z_dd[mid_idx]):.2f} pu")
+        print(f"    High ({freq_range_hz[-1]:.1f} Hz): |Z_dd| = {np.abs(Z_dd[-1]):.2f} pu")
+        print(f"    D-matrix contribution: |D[0,0]| = {np.abs(D[0,0]):.2f} pu\n")
         
         # Simplified magnitude for plotting
         Z_mag = np.abs(Z_dd) 
