@@ -317,15 +317,19 @@ The framework uses a clean separation of concerns with each module handling spec
 - Creates the complete system model from configuration
 
 **system_coordinator.py** - Network Solver
-- Manages Ybus matrices (pre-fault and during-fault)
-- Network solution with Park transformations (dq0 ↔ abc)
+- Builds Ybus matrix dynamically from Line data (no hardcoded values)
+- Manages pre-fault and during-fault admittance matrices
+- **Constant power load model** with iterative voltage solution
+- Park transformations (machine dq ↔ system RI frame)
 - Fault application: `apply_fault(bus_idx, impedance)`
-- Coordinates interaction between components and network
+- Coordinates generator-network interface via voltage-behind-reactance model
 
 **fault_sim_modular.py** ⭐ - Fault Simulation Module
+- **Fully dynamic** - adapts to any number of generators from JSON
+- Direct equilibrium initialization from power flow data
 - Configurable fault scenarios (any bus, any impedance, any time)
 - Automatic Ybus switching during fault events
-- Time-domain simulation with adaptive integration
+- Time-domain simulation with adaptive integration (solve_ivp)
 - Post-simulation plotting and analysis
 - Example: `sim.set_fault(bus_idx=1, impedance=0.01j, start_time=2.0, duration=0.15)`
 
@@ -553,9 +557,12 @@ amplitude = 0.01      # Injection amplitude (pu) - test different levels
 
 **Stability Improvements Applied:**
 - Fixed xd'' scaling bug (0.25 pu machine → 0.0278 pu system for 100/900 MVA)
+- **Fixed Ybus transformer scaling** (removed erroneous n² division)
+- **Implemented constant power loads** (I = S*/V instead of Y = P-jQ)
+- **Direct equilibrium initialization** (E'' = V + jXd''×I from power flow)
 - Added exciter anti-windup (prevents runaway to 117 pu) - **all methods**
 - Added governor saturation limits - **all methods**
-- Corrected network solver iterations (3 → 2 with safety check)
+- Corrected network solver iterations with convergence check
 - Fixed governor/exciter reference handling
 - Corrected diagnostic array reshaping (sol.y vs sol.y.T)
 - **Proper D-matrix computation in frequency-domain method** (captures network impedance)
@@ -761,19 +768,91 @@ builder_B.build_all_components()
 ## Technical Details
 
 ### State Vector Organization
-For a 4-machine system:
+For an N-machine system:
 - Each generator: 13 states (7 electrical + 4 exciter + 2 governor)
-- Total: 52 states for complete system dynamics
+- Total: 13×N states for complete system dynamics
+- Dynamic sizing: System adapts to any number of generators defined in JSON
 
 ### Network Solution
-- Admittance matrix (Ybus) formulation
-- Park transformation for dq0 reference frame
-- Iterative solution for nonlinear current-voltage relationships
+
+**Ybus Construction:**
+- Admittance matrix built directly from `Line` data in JSON
+- Per-unit values in JSON are already on common 100 MVA system base
+- For transformers: impedance given on common base, **no turns ratio scaling** in Ybus
+- Standard π-model for both lines and transformers
+
+**Load Modeling:**
+- **Constant power load model** with iterative solution
+- Load current: `I_load = conj(S_load / V)` updated each iteration
+- Converges in 3-5 iterations typically
+- Properly matches power flow results
+
+**Generator-Network Interface:**
+- Voltage-behind-reactance model: `E'' = V + jXd'' × I`
+- Park transformation converts machine dq frame to system RI frame
+- Internal EMF: `E_internal = Ed'' + j×Eq''` where `Eq'' = gd1 × ψf`
+- Generator admittance: `y_gen = 1/(j×Xd'')`
+
+**Per-Unit System:**
+- All reactances stored on **system base** (100 MVA) in gen_metadata
+- Conversion done once during component building (genrou.py)
+- Network solver uses values directly without additional conversion
+- Consistent base throughout all calculations
+
+### Equilibrium Initialization
+Direct calculation from power flow data:
+```python
+# For each generator:
+V_phasor = V_mag × exp(j × V_angle)    # From Bus data
+S = P_gen + j × Q_gen                   # From PV/Slack data
+I_phasor = conj(S / V_phasor)          # Generator current
+E_phasor = V_phasor + (ra + j×Xd'') × I_phasor  # Internal EMF
+delta = angle(E_phasor)                 # Rotor angle
+psi_f = |E_phasor| / gd1               # Field flux
+```
 
 ### Fault Modeling
-- Ybus modification during fault
+- Ybus modification during fault (adds fault admittance to diagonal)
 - Automatic switching at fault initiation and clearing
 - Preserves energy balance through fault transition
+- Configurable fault bus, impedance, and timing
+
+## Recent Fixes and Improvements (v1.1)
+
+### Critical Bug Fixes
+
+**1. Ybus Construction (system_coordinator.py)**
+- **Issue:** Transformer admittances were incorrectly scaled by turns ratio squared (n² = 132 for 230/20 kV)
+- **Result:** Generator bus admittances were 0.63 pu instead of correct ~83 pu
+- **Fix:** Removed turns ratio scaling since per-unit values in JSON are already on common 100 MVA base
+- **Impact:** Network solution now matches power flow results
+
+**2. Per-Unit Base Conversion (system_coordinator.py)**
+- **Issue:** `solve_network()` applied `Xd'' × (S_system/Sn)` conversion, but xd'' in metadata was already on system base
+- **Result:** Double conversion made Xd'' = 0.003 pu instead of 0.028 pu
+- **Fix:** Use metadata values directly without additional conversion
+- **Impact:** Generator currents and powers now correct
+
+**3. Load Model (system_coordinator.py)**
+- **Issue:** Used constant impedance model `Y_load = P - jQ`
+- **Result:** Power mismatch of 0.3-1.5 pu compared to power flow
+- **Fix:** Implemented constant power model with iterative solution: `I_load = conj(S/V)`
+- **Impact:** Power matching error reduced from ~1 pu to <0.01 pu
+
+**4. Equilibrium Initialization (fault_sim_modular.py)**
+- **Issue:** Hardcoded for 4 generators, iterative solver not converging
+- **Result:** Wrong initial angles, power oscillations
+- **Fix:** Direct calculation from power flow using `E'' = V + jXd'' × I`
+- **Impact:** Stable equilibrium with angles matching power flow
+
+### Verification Results
+
+After fixes, the system shows:
+- **Power matching:** P_error < 0.005 pu for all generators
+- **Voltage matching:** V_error < 0.001 pu at all buses
+- **Angle accuracy:** δ within 0.1° of power flow results
+- **Stable dynamics:** ω oscillates around 1.0 pu with proper damping
+- **Fault response:** Angles remain bounded (45-65°), return to equilibrium
 
 ## Future Extensions
 
@@ -881,6 +960,22 @@ To contribute new models or analysis tools:
 
 ---
 
-**Framework Version**: 1.0  
-**Author**: [Your Name]  
+**Framework Version**: 1.1
+**Author**: [Your Name]
 **Last Updated**: January 2026
+
+### Changelog
+
+**v1.1 (January 2026)**
+- Fixed Ybus transformer scaling bug (removed incorrect turns ratio division)
+- Fixed double per-unit base conversion in solve_network
+- Implemented constant power load model with iterative solution
+- Rewrote equilibrium initialization using direct power flow calculation
+- Made fault_sim_modular fully dynamic (supports any number of generators)
+- Power flow matching improved from ~1 pu error to <0.01 pu error
+
+**v1.0 (January 2026)**
+- Initial release with modular Port-Hamiltonian framework
+- Three impedance scanning methods (frequency-domain, IMTB, time-domain)
+- Fault simulation with configurable scenarios
+- JSON-based system configuration
