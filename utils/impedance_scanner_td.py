@@ -39,12 +39,24 @@ class ImpedanceScannerTD:
                 return float(v)
         return default
 
-    def _solve_network_with_injection(self, gen_states, target_bus, I_inj_complex):
+    def _solve_network_with_injection(self, gen_states, target_bus, I_inj_dq):
+        """Network solver with dq-frame current injection.
+
+        Args:
+            gen_states: Generator states (n_gen x 7)
+            target_bus: Bus index for injection (-1 for no injection)
+            I_inj_dq: Complex injection current in DQ FRAME (Id + j*Iq)
+                      This will be transformed to network (RI) frame using delta.
+
+        Returns:
+            Vd, Vq, Id, Iq: DQ frame voltages and currents
+            V_term: Network frame (RI) terminal voltages
+        """
         # 1. Setup Matrices
         Ybus = self.coordinator.Ybus_base
-        Xd2 = 0.25 * (100.0 / 900.0) 
+        Xd2 = 0.25 * (100.0 / 900.0)
         y_gen = 1.0 / (1j * Xd2)
-        
+
         # 2. Internal Voltages
         E_sys = np.zeros(self.n_gen, dtype=complex)
         for i in range(self.n_gen):
@@ -56,35 +68,45 @@ class ImpedanceScannerTD:
             E_sys[i] = (np.real(E_int) * np.cos(delta) - np.imag(E_int) * np.sin(delta)) + \
                        1j * (np.real(E_int) * np.sin(delta) + np.imag(E_int) * np.cos(delta))
 
-        # 3. Iterative Solve (match fault_sim_modular)
+        # 3. Transform injection from DQ to RI (network) frame
+        I_inj_net = 0j
+        if target_bus >= 0 and I_inj_dq != 0j:
+            delta_target = gen_states[target_bus, 0]
+            Id_inj = np.real(I_inj_dq)
+            Iq_inj = np.imag(I_inj_dq)
+            # Park transformation: dq -> RI (same as other scanners)
+            I_inj_net = (Id_inj * np.cos(delta_target) - Iq_inj * np.sin(delta_target)) + \
+                        1j * (Id_inj * np.sin(delta_target) + Iq_inj * np.cos(delta_target))
+
+        # 4. Iterative Solve (match fault_sim_modular)
         I_gen_source = E_sys * y_gen
         S_load = self.coordinator.load_P + 1j * self.coordinator.load_Q
         V_term = np.ones(self.n_gen, dtype=complex)
         Y_total = Ybus + np.eye(self.n_gen) * y_gen
-        
+
         # First iteration
         I_load = np.conj(S_load / V_term)
         I_rhs = I_gen_source - I_load
         if target_bus >= 0:
-            I_rhs[target_bus] += I_inj_complex
+            I_rhs[target_bus] += I_inj_net
         V_term = np.linalg.solve(Y_total, I_rhs)
-        
+
         # Refine (2nd iteration with safety)
         V_safe = np.where(np.abs(V_term) > 0.5, V_term, np.ones(self.n_gen, dtype=complex))
         I_load = np.conj(S_load / V_safe)
         I_rhs = I_gen_source - I_load
         if target_bus >= 0:
-            I_rhs[target_bus] += I_inj_complex
+            I_rhs[target_bus] += I_inj_net
         V_term = np.linalg.solve(Y_total, I_rhs)
             
         # 4. Currents
         I_out = (E_sys - V_term) * y_gen
-        
+
         Vd = np.zeros(self.n_gen)
         Vq = np.zeros(self.n_gen)
         Id = np.zeros(self.n_gen)
         Iq = np.zeros(self.n_gen)
-        
+
         deltas = gen_states[:, 0]
         for i in range(self.n_gen):
             delta = deltas[i]
@@ -94,8 +116,9 @@ class ImpedanceScannerTD:
             Vq[i] = -v_r * np.sin(delta) + v_i * np.cos(delta)
             Id[i] = i_r * np.cos(delta) + i_i * np.sin(delta)
             Iq[i] = -i_r * np.sin(delta) + i_i * np.cos(delta)
-            
-        return Vd, Vq, Id, Iq
+
+        # Return V_term (RI frame) along with dq quantities for impedance measurement
+        return Vd, Vq, Id, Iq, V_term
 
     def _get_injection_current_interp(self, t):
         if self._inj_time is None or t > self._inj_time[-1]: return 0j
@@ -108,7 +131,7 @@ class ImpedanceScannerTD:
         gen_states = x[:, :7]
         
         I_inj_c = self._get_injection_current_interp(t) if target_bus >= 0 else 0j
-        Vd, Vq, Id, Iq = self._solve_network_with_injection(gen_states, target_bus, I_inj_c)
+        Vd, Vq, Id, Iq, _ = self._solve_network_with_injection(gen_states, target_bus, I_inj_c)
         
         dxdt = np.zeros_like(x)
         for i in range(self.n_gen):
@@ -172,22 +195,23 @@ class ImpedanceScannerTD:
         return dxdt.flatten()
 
     def generate_noise_signal(self, duration, f_max, amplitude):
+        """Generate band-limited white noise for injection (dual-axis)."""
         n_samples = int(duration * self.fs)
         t = np.linspace(0, duration, n_samples)
-        
+
         noise_d = np.random.normal(0, 1, n_samples)
         noise_q = np.random.normal(0, 1, n_samples)
-        
+
         sos = signal.butter(4, f_max, 'low', fs=self.fs, output='sos')
         filtered_d = signal.sosfilt(sos, noise_d)
         filtered_q = signal.sosfilt(sos, noise_q)
-        
+
         # Normalize
         if np.std(filtered_d) > 0:
             filtered_d = filtered_d / np.std(filtered_d) * amplitude
         if np.std(filtered_q) > 0:
             filtered_q = filtered_q / np.std(filtered_q) * amplitude
-        
+
         return t, filtered_d, filtered_q
 
     def _initialize_equilibrium(self):
@@ -204,7 +228,7 @@ class ImpedanceScannerTD:
                 M = self.builder.gen_metadata[i]['M']
                 gen_states[i] = [delta_init[i], M * 1.0, 0.0, 0.0, psi_f_init[i], 0.0, 0.0]
             
-            Vd, Vq, Id, Iq = self._solve_network_with_injection(gen_states, -1, 0j)
+            Vd, Vq, Id, Iq, _ = self._solve_network_with_injection(gen_states, -1, 0j)
             P_calc = Vd * Id + Vq * Iq
             V_mag = np.sqrt(Vd**2 + Vq**2)
             
@@ -221,6 +245,10 @@ class ImpedanceScannerTD:
             
             if max_error < 1e-4:
                 break
+        
+        # Print equilibrium diagnostics
+        print(f"  Equilibrium voltages: {V_mag}")
+        print(f"  Equilibrium powers: {P_calc}")
         
         # Build full state
         x0 = np.zeros((self.n_gen, 13))
@@ -242,7 +270,8 @@ class ImpedanceScannerTD:
             x0[i, 12] = P_eq
             self.builder.gov_metadata[i]['Pref'] = P_eq
             
-            # Update Vref
+            # Update Vref to match equilibrium voltage
+            # This prevents AVR from fighting the equilibrium
             exc_core = self.builder.exciters[i]
             for key in exc_core.subs.keys():
                 if 'Vref' in str(key):
@@ -319,13 +348,16 @@ class ImpedanceScannerTD:
         self.signals = {
             't': sol.t,
             'bus_idx': bus_idx,
-            # Generator electrical
+            # Generator electrical (dq frame)
             'Vd': np.zeros(N),
             'Vq': np.zeros(N),
             'Vt': np.zeros(N),
             'Id': np.zeros(N),
             'Iq': np.zeros(N),
             'Pe': np.zeros(N),
+            # Terminal voltage in RI frame (for impedance measurement)
+            'V_real': np.zeros(N),
+            'V_imag': np.zeros(N),
             # Generator mechanical
             'delta': np.zeros(N),
             'omega': np.zeros(N),
@@ -334,7 +366,7 @@ class ImpedanceScannerTD:
             'Efd': np.zeros(N),
             'Vref': np.zeros(N),
             'Gate': np.zeros(N),
-            # Injection
+            # Injection (RI frame)
             'Id_inj': np.zeros(N),
             'Iq_inj': np.zeros(N)
         }
@@ -344,7 +376,7 @@ class ImpedanceScannerTD:
             gen_states = x_k[:, :7]
             
             I_inj = self._get_injection_current_interp(sol.t[k])
-            Vd, Vq, Id_gen, Iq_gen = self._solve_network_with_injection(gen_states, bus_idx, I_inj)
+            Vd, Vq, Id_gen, Iq_gen, V_term = self._solve_network_with_injection(gen_states, bus_idx, I_inj)
             
             i = bus_idx
             self.signals['Vd'][k] = Vd[i]
@@ -353,6 +385,9 @@ class ImpedanceScannerTD:
             self.signals['Id'][k] = Id_gen[i]
             self.signals['Iq'][k] = Iq_gen[i]
             self.signals['Pe'][k] = Vd[i]*Id_gen[i] + Vq[i]*Iq_gen[i]
+            # Store RI frame voltage for impedance diagnostics
+            self.signals['V_real'][k] = np.real(V_term[i])
+            self.signals['V_imag'][k] = np.imag(V_term[i])
             
             self.signals['delta'][k] = gen_states[i, 0]
             M = self.builder.gen_metadata[i]['M']
@@ -456,65 +491,257 @@ class ImpedanceScannerTD:
         return fig
 
     def post_process_tfe(self, sol, bus_idx):
-        """Calculate Impedance using TFE (Welch)"""
-        print("  Processing Transfer Function Estimate...")
+        """Calculate DQ-frame Impedance using TFE (Welch)
+
+        We measure Z_dq = V_dq / I_dq where both are in the machine's dq frame.
+        This matches the approach used by impedance_scanner.py and imtb_scanner.py.
+
+        The injection current (I_d + j*I_q) is in dq frame, transformed to RI frame
+        for network solution, then voltage is measured back in dq frame.
+        """
+        print("  Processing Transfer Function Estimate (DQ Frame)...")
         t = sol.t
-        
-        V_complex = np.zeros(len(t), dtype=complex)
-        I_complex = np.zeros(len(t), dtype=complex)
-        
+
+        V_dq_complex = np.zeros(len(t), dtype=complex)
+        I_inj_dq = np.zeros(len(t), dtype=complex)
+
         for k in range(len(t)):
             I_inj = self._get_injection_current_interp(t[k])
-            I_complex[k] = I_inj
-            
+            I_inj_dq[k] = I_inj  # Injection in DQ frame
+
             x_k = sol.y[:, k].reshape(self.n_gen, self.states_per_machine)
             gen_states = x_k[:, :7]
-            
-            Vd, Vq, _, _ = self._solve_network_with_injection(gen_states, bus_idx, I_inj)
-            V_complex[k] = Vd[bus_idx] + 1j*Vq[bus_idx]
-            
+
+            # Injection is transformed to RI inside _solve_network_with_injection
+            # Output Vd, Vq are in DQ frame (matching injection frame)
+            Vd, Vq, Id_gen, Iq_gen, V_term = self._solve_network_with_injection(gen_states, bus_idx, I_inj)
+            V_dq_complex[k] = Vd[bus_idx] + 1j * Vq[bus_idx]  # DQ frame voltage
+
         # Diagnostics
-        v_rms = np.std(V_complex)
-        i_rms = np.std(I_complex)
-        print(f"  > Signal Statistics: V_rms={v_rms:.6f}, I_rms={i_rms:.6f}")
-        
-        if i_rms < 1e-9:
-            print("  ! WARNING: Injection current is effectively zero. Check amplitude.")
-            
-        V_ac = signal.detrend(V_complex, type='constant')
-        I_ac = signal.detrend(I_complex, type='constant')
-        
+        v_rms = np.std(V_dq_complex)
+        i_inj_rms = np.std(I_inj_dq)
+        v_mean = np.mean(np.abs(V_dq_complex))
+        print(f"  > Signal Statistics (DQ Frame):")
+        print(f"      V_dq_rms={v_rms:.6f} pu, V_dq_mean={v_mean:.6f} pu")
+        print(f"      I_inj_rms={i_inj_rms:.6f} pu (injection current in dq)")
+        print(f"      Quick Z_dq estimate: V/I={v_rms/i_inj_rms:.6f} pu")
+
+        if i_inj_rms < 1e-9:
+            print("  ! WARNING: Injection current is effectively zero.")
+
+        if v_rms < 1e-4:
+            print(f"  ! WARNING: Voltage response is very small ({v_rms:.6f} pu)!")
+
+        # Detrend signals (remove DC component)
+        V_ac = signal.detrend(V_dq_complex, type='constant')
+        I_ac = signal.detrend(I_inj_dq, type='constant')
+
         # Calculate Spectra
         n_seg = min(4096, len(t))
         f, P_iv = signal.csd(I_ac, V_ac, fs=self.fs, nperseg=n_seg, return_onesided=False)
         f, P_ii = signal.welch(I_ac, fs=self.fs, nperseg=n_seg, return_onesided=False)
         f, P_vv = signal.welch(V_ac, fs=self.fs, nperseg=n_seg, return_onesided=False)
-        
-        # Sort
+
+        # Sort frequencies
         f_shift = np.fft.fftshift(f)
         P_iv_shift = np.fft.fftshift(P_iv)
         P_ii_shift = np.fft.fftshift(P_ii)
         P_vv_shift = np.fft.fftshift(P_vv)
-        
+
         pos_mask = f_shift > 0
         freqs = f_shift[pos_mask]
         P_iv = P_iv_shift[pos_mask]
         P_ii = P_ii_shift[pos_mask]
         P_vv = P_vv_shift[pos_mask]
-        
-        # Impedance
+
+        # Impedance Z = V/I
         P_ii[np.abs(P_ii) < 1e-15] = 1e-15
         Z_est = P_iv / P_ii
-        
+
         # Coherence
         P_vv[np.abs(P_vv) < 1e-15] = 1e-15
         Coherence = (np.abs(P_iv)**2) / (P_ii * P_vv)
-        
-        # DEBUG: Print Average Coherence
+
         avg_coh = np.mean(Coherence)
         print(f"  > Average Coherence: {avg_coh:.4f}")
-        
-        # FILTER: Only filter by frequency range (Removed strict coherence filter)
+
+        # Filter by frequency range
         valid_mask = (freqs < self.f_end)
-        
+
         return freqs[valid_mask], Z_est[valid_mask]
+
+    def compute_network_impedance(self, bus_idx, freqs):
+        """Compute network impedance EXCLUDING the local generator at bus_idx.
+
+        This gives the impedance looking INTO the grid from the bus,
+        as if the local generator were disconnected.
+
+        For a purely algebraic network (no dynamics), the impedance is
+        frequency-independent and equals Z_network = inv(Y_bus)[bus_idx, bus_idx]
+        where Y_bus includes all OTHER generators' admittances but NOT the target.
+        """
+        print(f"  Computing Network Impedance (excluding Gen {bus_idx+1})...")
+
+        # Build Y_total but exclude the target generator's admittance
+        Ybus = self.coordinator.Ybus_base.copy()
+        Xd2 = 0.25 * (100.0 / 900.0)  # Xd'' on system base
+        y_gen = 1.0 / (1j * Xd2)
+
+        # Add all generators EXCEPT the target bus
+        Y_network = Ybus.copy()
+        for i in range(self.n_gen):
+            if i != bus_idx:
+                Y_network[i, i] += y_gen
+
+        # Network impedance at target bus (self-impedance from Z = inv(Y))
+        Z_network_matrix = np.linalg.inv(Y_network)
+        Z_network_self = Z_network_matrix[bus_idx, bus_idx]
+
+        # Network impedance is frequency-independent (purely algebraic)
+        # Return same value for all frequencies
+        Z_network = np.full(len(freqs), Z_network_self, dtype=complex)
+
+        print(f"      Z_network = {np.abs(Z_network_self):.4f} pu @ {np.degrees(np.angle(Z_network_self)):.1f}°")
+
+        return Z_network
+
+    def compute_generator_impedance(self, bus_idx, freqs):
+        """Compute synchronous generator impedance vs frequency.
+
+        The generator impedance is the operational impedance of the synchronous
+        machine. For GENROU model, the d-axis operational impedance is:
+
+        Zd(s) = Ra + Xd''*s * (1 + s*Td'') * (1 + s*Td') / ((1 + s*Td0') * (1 + s*Td0''))
+
+        At different frequencies:
+        - f → 0: Z → Ra (stator resistance)
+        - f = 60 Hz: Z ≈ j*Xd'' (subtransient reactance)
+        - f → ∞: Z → Ra + j*ω*Ll (leakage)
+
+        Note: Values are on SYSTEM BASE (100 MVA), not machine base.
+        """
+        print(f"  Computing Generator Impedance for Gen {bus_idx+1}...")
+
+        meta = self.builder.gen_metadata[bus_idx]
+
+        # Machine parameters (on machine base 900 MVA)
+        Ra_m = meta['ra']       # Stator resistance
+        Xd_m = meta.get('xd', 1.8)    # Synchronous reactance
+        Xd1_m = meta['xd1']     # Transient reactance (Xd')
+        Xd2_m = meta.get('xd2', 0.25)  # Subtransient reactance (Xd'')
+        Xl_m = meta['xl']       # Leakage reactance
+
+        # Time constants
+        Td10 = 8.0   # d-axis transient open-circuit time constant
+        Td20 = 0.03  # d-axis subtransient open-circuit time constant
+
+        # Derived time constants (short-circuit)
+        Td1 = Td10 * Xd1_m / Xd_m    # Td'
+        Td2 = Td20 * Xd2_m / Xd1_m   # Td''
+
+        # Convert to system base (100 MVA)
+        base_ratio = 100.0 / 900.0
+        Ra = Ra_m * base_ratio
+        Xd = Xd_m * base_ratio
+        Xd1 = Xd1_m * base_ratio
+        Xd2 = Xd2_m * base_ratio
+        Xl = Xl_m * base_ratio
+
+        print(f"      Ra={Ra:.4f}, Xd={Xd:.4f}, Xd'={Xd1:.4f}, Xd''={Xd2:.4f} pu (system base)")
+        print(f"      Td0'={Td10:.2f}s, Td0''={Td20:.3f}s, Td'={Td1:.4f}s, Td''={Td2:.6f}s")
+
+        # Compute frequency-dependent impedance
+        omega_b = 2 * np.pi * 60.0  # Base angular frequency (rad/s)
+        Z_gen = np.zeros(len(freqs), dtype=complex)
+
+        for i, f in enumerate(freqs):
+            if f < 1e-6:
+                # DC limit: just stator resistance
+                Z_gen[i] = Ra + 1e-10j
+            else:
+                s = 1j * 2 * np.pi * f  # Laplace variable
+
+                # Operational d-axis impedance (simplified GENROU model)
+                # Zd(s) = Ra + Xd(s) where Xd(s) is the operational reactance
+                # Xd(s) = Xd * (1 + s*Td') * (1 + s*Td'') / ((1 + s*Td0') * (1 + s*Td0''))
+
+                num = (1 + s * Td1) * (1 + s * Td2)
+                den = (1 + s * Td10) * (1 + s * Td20)
+                Xd_op = Xd * num / den
+
+                # Convert reactance to impedance (multiply by j for inductance)
+                Z_gen[i] = Ra + 1j * Xd_op
+
+        # Print some reference values
+        idx_1hz = np.argmin(np.abs(freqs - 1.0))
+        idx_10hz = np.argmin(np.abs(freqs - 10.0))
+        idx_50hz = np.argmin(np.abs(freqs - 50.0))
+
+        if len(freqs) > 0:
+            print(f"      Z_gen @ 1 Hz: {np.abs(Z_gen[idx_1hz]):.4f} pu")
+            print(f"      Z_gen @ 10 Hz: {np.abs(Z_gen[idx_10hz]):.4f} pu")
+            print(f"      Z_gen @ 50 Hz: {np.abs(Z_gen[idx_50hz]):.4f} pu")
+
+        return Z_gen
+
+    def compute_all_impedances(self, sol, bus_idx):
+        """Compute all three impedance types and return them.
+
+        Returns:
+            freqs: Frequency array
+            Z_total: Full Thevenin impedance (measured from simulation)
+            Z_network: Network impedance (excluding local generator)
+            Z_gen: Generator impedance (analytical)
+        """
+        print("\n" + "="*60)
+        print("COMPUTING ALL IMPEDANCE COMPONENTS")
+        print("="*60)
+
+        # 1. Full Thevenin impedance (from simulation)
+        freqs, Z_total = self.post_process_tfe(sol, bus_idx)
+
+        # 2. Network impedance (analytical)
+        Z_network = self.compute_network_impedance(bus_idx, freqs)
+
+        # 3. Generator impedance (analytical)
+        Z_gen = self.compute_generator_impedance(bus_idx, freqs)
+
+        return freqs, Z_total, Z_network, Z_gen
+
+    def plot_all_impedances(self, freqs, Z_total, Z_network, Z_gen, bus_name, output_file):
+        """Plot all three impedances in subplots."""
+        import matplotlib.pyplot as plt
+
+        fig, axes = plt.subplots(3, 2, figsize=(14, 12))
+        fig.suptitle(f'Impedance Analysis at {bus_name}', fontsize=14)
+
+        impedances = [
+            (Z_total, 'Full Thevenin Impedance (Measured)', 'b'),
+            (Z_network, 'Network Impedance (Analytical)', 'g'),
+            (Z_gen, 'Generator Impedance (Analytical)', 'r')
+        ]
+
+        for row, (Z, title, color) in enumerate(impedances):
+            # Magnitude
+            axes[row, 0].loglog(freqs, np.abs(Z), color + '-', linewidth=2)
+            axes[row, 0].set_ylabel('|Z| (pu)')
+            axes[row, 0].set_title(f'{title} - Magnitude')
+            axes[row, 0].grid(True, which='both', alpha=0.4)
+            axes[row, 0].set_xlim(0.1, self.f_end)
+
+            # Phase
+            axes[row, 1].semilogx(freqs, np.degrees(np.angle(Z)), color + '-', linewidth=2)
+            axes[row, 1].set_ylabel('Phase (°)')
+            axes[row, 1].set_title(f'{title} - Phase')
+            axes[row, 1].grid(True, which='both', alpha=0.4)
+            axes[row, 1].set_xlim(0.1, self.f_end)
+            axes[row, 1].set_ylim(-180, 180)
+
+        axes[2, 0].set_xlabel('Frequency (Hz)')
+        axes[2, 1].set_xlabel('Frequency (Hz)')
+
+        plt.tight_layout()
+        plt.savefig(output_file, dpi=150, bbox_inches='tight')
+        print(f"\n  Combined impedance plot saved to: {output_file}")
+
+        return fig

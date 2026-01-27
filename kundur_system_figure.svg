@@ -1,0 +1,160 @@
+<svg width="1550" height="650" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+<polygon points="0 0, 10 3.5, 0 7" fill="#666"/>
+</marker>
+</defs>
+<rect width="100%" height="100%" fill="#fafafa"/>
+<text x="50" y="35" font-family="Arial" font-size="22" font-weight="bold" fill="#1a237e">Kundur Two-Area Power System - PHS Topology</text>
+<rect x="100" y="55" width="400" height="30" fill="#e3f2fd" stroke="#1976d2" rx="5"/>
+<text x="300" y="75" font-family="Arial" font-size="14" font-weight="bold" fill="#1976d2" text-anchor="middle">AREA 1</text>
+<rect x="1000" y="55" width="400" height="30" fill="#fce4ec" stroke="#c2185b" rx="5"/>
+<text x="1200" y="75" font-family="Arial" font-size="14" font-weight="bold" fill="#c2185b" text-anchor="middle">AREA 2</text>
+<rect x="50" y="580" width="1450" height="55" fill="#f5f5f5" stroke="#bdbdbd" rx="5"/>
+<text x="70" y="600" font-family="Arial" font-size="12" font-weight="bold">Legend:</text>
+<circle cx="170" cy="605" r="12" fill="#fff" stroke="#1976d2" stroke-width="2"/>
+<text x="165" y="610" font-family="Arial" font-size="10" font-weight="bold" fill="#1976d2">G</text>
+<text x="190" y="610" font-family="Arial" font-size="11">Generator</text>
+<rect x="270" y="595" width="20" height="20" fill="#fff3e0" stroke="#ff6f00" stroke-width="2" rx="3"/>
+<text x="275" y="610" font-family="Arial" font-size="8" font-weight="bold" fill="#ff6f00">E</text>
+<text x="300" y="610" font-family="Arial" font-size="11">Exciter</text>
+<rect x="380" y="595" width="20" height="20" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2" rx="3"/>
+<text x="385" y="610" font-family="Arial" font-size="8" font-weight="bold" fill="#2e7d32">G</text>
+<text x="410" y="610" font-family="Arial" font-size="11">Governor</text>
+<circle cx="510" cy="600" r="8" fill="none" stroke="#7b1fa2" stroke-width="2"/>
+<circle cx="520" cy="610" r="8" fill="none" stroke="#7b1fa2" stroke-width="2"/>
+<text x="540" y="610" font-family="Arial" font-size="11">Transformer</text>
+<line x1="630" y1="605" x2="680" y2="605" stroke="#424242" stroke-width="3"/>
+<text x="690" y="610" font-family="Arial" font-size="11">Transmission Line</text>
+<rect x="810" y="592" width="8" height="26" fill="#212121" rx="2"/>
+<text x="830" y="610" font-family="Arial" font-size="11">Bus</text>
+<polygon points="900,615 915,595 930,615" fill="#fff" stroke="#d32f2f" stroke-width="2"/>
+<text x="940" y="610" font-family="Arial" font-size="11">Load</text>
+<line x1="354.0" y1="120.0" x2="354.0" y2="480.0" stroke="#424242" stroke-width="2"/>
+<line x1="346.0" y1="120.0" x2="346.0" y2="480.0" stroke="#424242" stroke-width="2"/>
+<rect x="305.0" y="305.0" width="90" height="14" fill="#fff" fill-opacity="0.9" rx="2"/>
+<text x="350.0" y="315.0" font-family="Arial" font-size="9" fill="#616161" text-anchor="middle">2x parallel, X_eq=0.0250</text>
+<line x1="347.3241410735102" y1="477.02682341501134" x2="547.3241410735102" y2="297.02682341501134" stroke="#424242" stroke-width="2"/>
+<line x1="352.6758589264898" y1="482.97317658498866" x2="552.6758589264898" y2="302.97317658498866" stroke="#424242" stroke-width="2"/>
+<rect x="405.0" y="395.0" width="90" height="14" fill="#fff" fill-opacity="0.9" rx="2"/>
+<text x="450.0" y="405.0" font-family="Arial" font-size="9" fill="#616161" text-anchor="middle">2x parallel, X_eq=0.0100</text>
+<line x1="550.0" y1="292.0" x2="950.0" y2="292.0" stroke="#424242" stroke-width="2"/>
+<line x1="550.0" y1="300.0" x2="950.0" y2="300.0" stroke="#424242" stroke-width="2"/>
+<line x1="550.0" y1="308.0" x2="950.0" y2="308.0" stroke="#424242" stroke-width="2"/>
+<rect x="705.0" y="275.0" width="90" height="14" fill="#fff" fill-opacity="0.9" rx="2"/>
+<text x="750.0" y="285.0" font-family="Arial" font-size="9" fill="#616161" text-anchor="middle">3x parallel, X_eq=0.0733</text>
+<line x1="952.6758589264898" y1="297.02682341501134" x2="1152.6758589264898" y2="477.02682341501134" stroke="#424242" stroke-width="2"/>
+<line x1="947.3241410735102" y1="302.97317658498866" x2="1147.3241410735102" y2="482.97317658498866" stroke="#424242" stroke-width="2"/>
+<rect x="1005.0" y="395.0" width="90" height="14" fill="#fff" fill-opacity="0.9" rx="2"/>
+<text x="1050.0" y="405.0" font-family="Arial" font-size="9" fill="#616161" text-anchor="middle">2x parallel, X_eq=0.0100</text>
+<line x1="1146.0" y1="480.0" x2="1146.0" y2="120.0" stroke="#424242" stroke-width="2"/>
+<line x1="1154.0" y1="480.0" x2="1154.0" y2="120.0" stroke="#424242" stroke-width="2"/>
+<rect x="1105.0" y="305.0" width="90" height="14" fill="#fff" fill-opacity="0.9" rx="2"/>
+<text x="1150.0" y="315.0" font-family="Arial" font-size="9" fill="#616161" text-anchor="middle">2x parallel, X_eq=0.0250</text>
+<line x1="150" y1="120" x2="232.0" y2="120.0" stroke="#7b1fa2" stroke-width="3"/>
+<line x1="268.0" y1="120.0" x2="350" y2="120" stroke="#7b1fa2" stroke-width="3"/>
+<circle cx="240.0" cy="120.0" r="12" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2"/>
+<circle cx="260.0" cy="120.0" r="12" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2"/>
+<text x="250.0" y="150.0" font-family="Arial" font-size="9" fill="#7b1fa2" text-anchor="middle">Line_11</text>
+<text x="250.0" y="161.0" font-family="Arial" font-size="8" fill="#9c27b0" text-anchor="middle">X=0.012, n=11.5</text>
+<line x1="150" y1="480" x2="232.0" y2="480.0" stroke="#7b1fa2" stroke-width="3"/>
+<line x1="268.0" y1="480.0" x2="350" y2="480" stroke="#7b1fa2" stroke-width="3"/>
+<circle cx="240.0" cy="480.0" r="12" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2"/>
+<circle cx="260.0" cy="480.0" r="12" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2"/>
+<text x="250.0" y="455.0" font-family="Arial" font-size="9" fill="#7b1fa2" text-anchor="middle">Line_12</text>
+<text x="250.0" y="466.0" font-family="Arial" font-size="8" fill="#9c27b0" text-anchor="middle">X=0.012, n=11.5</text>
+<line x1="1350" y1="480" x2="1268.0" y2="480.0" stroke="#7b1fa2" stroke-width="3"/>
+<line x1="1232.0" y1="480.0" x2="1150" y2="480" stroke="#7b1fa2" stroke-width="3"/>
+<circle cx="1260.0" cy="480.0" r="12" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2"/>
+<circle cx="1240.0" cy="480.0" r="12" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2"/>
+<text x="1250.0" y="455.0" font-family="Arial" font-size="9" fill="#7b1fa2" text-anchor="middle">Line_13</text>
+<text x="1250.0" y="466.0" font-family="Arial" font-size="8" fill="#9c27b0" text-anchor="middle">X=0.012, n=11.5</text>
+<line x1="1350" y1="120" x2="1268.0" y2="120.0" stroke="#7b1fa2" stroke-width="3"/>
+<line x1="1232.0" y1="120.0" x2="1150" y2="120" stroke="#7b1fa2" stroke-width="3"/>
+<circle cx="1260.0" cy="120.0" r="12" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2"/>
+<circle cx="1240.0" cy="120.0" r="12" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2"/>
+<text x="1250.0" y="150.0" font-family="Arial" font-size="9" fill="#7b1fa2" text-anchor="middle">Line_14</text>
+<text x="1250.0" y="161.0" font-family="Arial" font-size="8" fill="#9c27b0" text-anchor="middle">X=0.012, n=11.5</text>
+<line x1="150" y1="120" x2="70" y2="120.0" stroke="#1976d2" stroke-width="2"/>
+<circle cx="70" cy="120.0" r="22" fill="#e3f2fd" stroke="#1976d2" stroke-width="3"/>
+<text x="70" y="125.0" font-family="Arial" font-size="14" font-weight="bold" fill="#1976d2" text-anchor="middle">G1</text>
+<text x="35" y="105.0" font-family="Arial" font-size="9" fill="#1565c0" text-anchor="middle">M=13.0</text>
+<text x="35" y="117.0" font-family="Arial" font-size="9" fill="#1565c0" text-anchor="middle">900MVA</text>
+<line x1="150" y1="480" x2="70" y2="480.0" stroke="#1976d2" stroke-width="2"/>
+<circle cx="70" cy="480.0" r="22" fill="#e3f2fd" stroke="#1976d2" stroke-width="3"/>
+<text x="70" y="485.0" font-family="Arial" font-size="14" font-weight="bold" fill="#1976d2" text-anchor="middle">G2</text>
+<text x="35" y="465.0" font-family="Arial" font-size="9" fill="#1565c0" text-anchor="middle">M=13.0</text>
+<text x="35" y="477.0" font-family="Arial" font-size="9" fill="#1565c0" text-anchor="middle">900MVA</text>
+<line x1="1350" y1="480" x2="1430" y2="480.0" stroke="#1976d2" stroke-width="2"/>
+<circle cx="1430" cy="480.0" r="22" fill="#e3f2fd" stroke="#1976d2" stroke-width="3"/>
+<text x="1430" y="485.0" font-family="Arial" font-size="14" font-weight="bold" fill="#1976d2" text-anchor="middle">G3</text>
+<text x="1465" y="465.0" font-family="Arial" font-size="9" fill="#1565c0" text-anchor="middle">M=12.35</text>
+<text x="1465" y="477.0" font-family="Arial" font-size="9" fill="#1565c0" text-anchor="middle">900MVA</text>
+<line x1="1350" y1="120" x2="1430" y2="120.0" stroke="#1976d2" stroke-width="2"/>
+<circle cx="1430" cy="120.0" r="22" fill="#e3f2fd" stroke="#1976d2" stroke-width="3"/>
+<text x="1430" y="125.0" font-family="Arial" font-size="14" font-weight="bold" fill="#1976d2" text-anchor="middle">G4</text>
+<text x="1465" y="105.0" font-family="Arial" font-size="9" fill="#1565c0" text-anchor="middle">M=12.35</text>
+<text x="1465" y="117.0" font-family="Arial" font-size="9" fill="#1565c0" text-anchor="middle">900MVA</text>
+<line x1="70" y1="98.0" x2="70" y2="82.0" stroke="#ff6f00" stroke-width="1.5" stroke-dasharray="3,2"/>
+<rect x="55" y="58.0" width="30" height="24" fill="#fff3e0" stroke="#ff6f00" stroke-width="2" rx="4"/>
+<text x="70" y="74.0" font-family="Arial" font-size="9" font-weight="bold" fill="#e65100" text-anchor="middle">AVR</text>
+<line x1="70" y1="458.0" x2="70" y2="442.0" stroke="#ff6f00" stroke-width="1.5" stroke-dasharray="3,2"/>
+<rect x="55" y="418.0" width="30" height="24" fill="#fff3e0" stroke="#ff6f00" stroke-width="2" rx="4"/>
+<text x="70" y="434.0" font-family="Arial" font-size="9" font-weight="bold" fill="#e65100" text-anchor="middle">AVR</text>
+<line x1="1430" y1="458.0" x2="1430" y2="442.0" stroke="#ff6f00" stroke-width="1.5" stroke-dasharray="3,2"/>
+<rect x="1415" y="418.0" width="30" height="24" fill="#fff3e0" stroke="#ff6f00" stroke-width="2" rx="4"/>
+<text x="1430" y="434.0" font-family="Arial" font-size="9" font-weight="bold" fill="#e65100" text-anchor="middle">AVR</text>
+<line x1="1430" y1="98.0" x2="1430" y2="82.0" stroke="#ff6f00" stroke-width="1.5" stroke-dasharray="3,2"/>
+<rect x="1415" y="58.0" width="30" height="24" fill="#fff3e0" stroke="#ff6f00" stroke-width="2" rx="4"/>
+<text x="1430" y="74.0" font-family="Arial" font-size="9" font-weight="bold" fill="#e65100" text-anchor="middle">AVR</text>
+<line x1="70" y1="142.0" x2="70" y2="158.0" stroke="#2e7d32" stroke-width="1.5" stroke-dasharray="3,2"/>
+<rect x="55" y="158.0" width="30" height="24" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2" rx="4"/>
+<text x="70" y="174.0" font-family="Arial" font-size="9" font-weight="bold" fill="#1b5e20" text-anchor="middle">GOV</text>
+<line x1="70" y1="502.0" x2="70" y2="518.0" stroke="#2e7d32" stroke-width="1.5" stroke-dasharray="3,2"/>
+<rect x="55" y="518.0" width="30" height="24" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2" rx="4"/>
+<text x="70" y="534.0" font-family="Arial" font-size="9" font-weight="bold" fill="#1b5e20" text-anchor="middle">GOV</text>
+<line x1="1430" y1="502.0" x2="1430" y2="518.0" stroke="#2e7d32" stroke-width="1.5" stroke-dasharray="3,2"/>
+<rect x="1415" y="518.0" width="30" height="24" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2" rx="4"/>
+<text x="1430" y="534.0" font-family="Arial" font-size="9" font-weight="bold" fill="#1b5e20" text-anchor="middle">GOV</text>
+<line x1="1430" y1="142.0" x2="1430" y2="158.0" stroke="#2e7d32" stroke-width="1.5" stroke-dasharray="3,2"/>
+<rect x="1415" y="158.0" width="30" height="24" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2" rx="4"/>
+<text x="1430" y="174.0" font-family="Arial" font-size="9" font-weight="bold" fill="#1b5e20" text-anchor="middle">GOV</text>
+<line x1="550" y1="300" x2="550" y2="335" stroke="#d32f2f" stroke-width="2"/>
+<polygon points="550,365 535,340 565,340" fill="#ffebee" stroke="#d32f2f" stroke-width="2"/>
+<text x="550" y="380" font-family="Arial" font-size="9" fill="#c62828" text-anchor="middle">P=11.59pu</text>
+<text x="550" y="391" font-family="Arial" font-size="9" fill="#c62828" text-anchor="middle">Q=-0.735pu</text>
+<line x1="950" y1="300" x2="950" y2="335" stroke="#d32f2f" stroke-width="2"/>
+<polygon points="950,365 935,340 965,340" fill="#ffebee" stroke="#d32f2f" stroke-width="2"/>
+<text x="950" y="380" font-family="Arial" font-size="9" fill="#c62828" text-anchor="middle">P=15.75pu</text>
+<text x="950" y="391" font-family="Arial" font-size="9" fill="#c62828" text-anchor="middle">Q=-0.899pu</text>
+<rect x="145" y="90" width="10" height="60" fill="#1565c0" rx="2"/>
+<text x="150" y="80" font-family="Arial" font-size="12" font-weight="bold" text-anchor="middle">1</text>
+<text x="150" y="170" font-family="Arial" font-size="10" fill="#757575" text-anchor="middle">20kV</text>
+<rect x="145" y="450" width="10" height="60" fill="#1565c0" rx="2"/>
+<text x="150" y="440" font-family="Arial" font-size="12" font-weight="bold" text-anchor="middle">2</text>
+<text x="150" y="530" font-family="Arial" font-size="10" fill="#757575" text-anchor="middle">20kV</text>
+<rect x="1345" y="450" width="10" height="60" fill="#1565c0" rx="2"/>
+<text x="1350" y="440" font-family="Arial" font-size="12" font-weight="bold" text-anchor="middle">12</text>
+<text x="1350" y="530" font-family="Arial" font-size="10" fill="#757575" text-anchor="middle">20kV</text>
+<rect x="1345" y="90" width="10" height="60" fill="#1565c0" rx="2"/>
+<text x="1350" y="80" font-family="Arial" font-size="12" font-weight="bold" text-anchor="middle">11</text>
+<text x="1350" y="170" font-family="Arial" font-size="10" fill="#757575" text-anchor="middle">20kV</text>
+<rect x="345" y="90" width="10" height="60" fill="#212121" rx="2"/>
+<text x="350" y="80" font-family="Arial" font-size="12" font-weight="bold" text-anchor="middle">101</text>
+<text x="350" y="170" font-family="Arial" font-size="10" fill="#757575" text-anchor="middle">230kV</text>
+<rect x="345" y="450" width="10" height="60" fill="#212121" rx="2"/>
+<text x="350" y="440" font-family="Arial" font-size="12" font-weight="bold" text-anchor="middle">102</text>
+<text x="350" y="530" font-family="Arial" font-size="10" fill="#757575" text-anchor="middle">230kV</text>
+<rect x="545" y="270" width="10" height="60" fill="#212121" rx="2"/>
+<text x="550" y="260" font-family="Arial" font-size="12" font-weight="bold" text-anchor="middle">3</text>
+<text x="550" y="350" font-family="Arial" font-size="10" fill="#757575" text-anchor="middle">230kV</text>
+<rect x="945" y="270" width="10" height="60" fill="#212121" rx="2"/>
+<text x="950" y="260" font-family="Arial" font-size="12" font-weight="bold" text-anchor="middle">13</text>
+<text x="950" y="350" font-family="Arial" font-size="10" fill="#757575" text-anchor="middle">230kV</text>
+<rect x="1145" y="450" width="10" height="60" fill="#212121" rx="2"/>
+<text x="1150" y="440" font-family="Arial" font-size="12" font-weight="bold" text-anchor="middle">112</text>
+<text x="1150" y="530" font-family="Arial" font-size="10" fill="#757575" text-anchor="middle">230kV</text>
+<rect x="1145" y="90" width="10" height="60" fill="#212121" rx="2"/>
+<text x="1150" y="80" font-family="Arial" font-size="12" font-weight="bold" text-anchor="middle">111</text>
+<text x="1150" y="170" font-family="Arial" font-size="10" fill="#757575" text-anchor="middle">230kV</text>
+</svg>

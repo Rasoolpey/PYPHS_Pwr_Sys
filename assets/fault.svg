@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="Layer_1" xmlns="http://www.w3.org/2000/svg" version="1.1" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 12.63 31.24">
+  <!-- Generator: Adobe Illustrator 29.8.4, SVG Export Plug-In . SVG Version: 2.1.1 Build 6)  -->
+  <defs>
+    <style>
+      .st0 {
+        fill: #010101;
+      }
+
+      .st0, .st1 {
+        stroke: #010101;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        stroke-width: .26px;
+      }
+
+      .st1 {
+        fill: none;
+      }
+    </style>
+    <symbol id="Diode_full" viewBox="0 0 -32766 -32766"/>
+    <symbol id="Z-Diode_1_full" viewBox="0 0 4.13 11.53">
+      <g>
+        <path id="path18" class="st1" d="M3.99,6.03l-2.32,3.22"/>
+        <path id="path18-3" class="st1" d="M.93,3.51l3.06,2.52"/>
+        <path id="path19" class="st0" d="M2.75,10.03l-2.15-1.54-.47,2.92,2.62-1.38Z"/>
+        <path id="path18-31" data-name="path18-3" class="st1" d="M.87,3.4L3.12.13"/>
+      </g>
+    </symbol>
+  </defs>
+  <use id="use37" width="-32766" height="-32766" transform="translate(46409.2 -46407.69) scale(2.83 -2.83)" xlink:href="#Diode_full"/>
+  <use id="use371" data-name="use37" width="-32766" height="-32766" transform="translate(46422.7 -46407.21) scale(2.83 -2.83)" xlink:href="#Diode_full"/>
+  <use id="use372" data-name="use37" width="-32766" height="-32766" transform="translate(46422.7 -46407.21) scale(2.83 -2.83)" xlink:href="#Diode_full"/>
+  <use id="use373" data-name="use37" width="-32766" height="-32766" transform="translate(46422.7 -46407.21) scale(2.83 -2.83)" xlink:href="#Diode_full"/>
+  <use id="use374" data-name="use37" width="-32766" height="-32766" transform="translate(46558.03 -46355.1) scale(2.83 -2.83)" xlink:href="#Diode_full"/>
+  <use id="use22" width="4.13" height="11.53" transform="translate(9.75 -1.1) rotate(174.45) scale(2.83 -2.83)" xlink:href="#Z-Diode_1_full"/>
+</svg>
