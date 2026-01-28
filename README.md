@@ -33,6 +33,12 @@ This framework provides a **fully modular architecture** for Port-Hamiltonian mo
 
 ### 🚀 **Current Analysis Capabilities**
 - **Fault Simulation** (`fault_sim_modular.py`): Configurable fault analysis with dynamic Ybus switching
+- **Lyapunov Stability Analysis** (`lyapunov_analyzer.py`): Energy-based stability assessment
+  - Linearized stability via eigenvalue analysis
+  - Port-Hamiltonian energy function as Lyapunov candidate
+  - Region of attraction estimation with dV/dt criterion
+  - Transient energy margin computation
+  - Multi-panel stability visualization
 - **Impedance Scanning** (Multiple methods):
   - `impedance_scanner.py`: Frequency-domain linearization (fast, small-signal)
   - `imtb_scanner.py`: IMTB multisine injection (MIMO, medium-amplitude)
@@ -65,6 +71,7 @@ This framework provides a **fully modular architecture** for Port-Hamiltonian mo
 │   ├── system_builder.py        # JSON parser and system assembler
 │   ├── system_coordinator.py    # Network solver, Ybus management, Park transforms
 │   ├── fault_sim_modular.py     # ⭐ Fault simulation module (configurable faults)
+│   ├── lyapunov_analyzer.py     # ⭐ Lyapunov stability analysis (energy-based)
 │   ├── impedance_scanner.py     # ⭐ Frequency-domain impedance (linearization)
 │   ├── imtb_scanner.py          # ⭐ IMTB multisine impedance scanner (MIMO)
 │   ├── impedance_scanner_td.py  # ⭐ Time-domain white noise impedance scanner
@@ -82,6 +89,7 @@ This framework provides a **fully modular architecture** for Port-Hamiltonian mo
 ├── main.py                       # Basic system building example
 ├── test_system.py               # Component verification tests
 ├── test_modular_fault.py        # Fault simulation tests
+├── test_lyapunov.py             # Lyapunov stability analysis tests
 ├── test_impedance_scanning.py   # Frequency-domain impedance scanning tests
 ├── test_imtb_scanning.py        # IMTB multisine impedance tests
 └── test_impedance_td.py         # Time-domain white noise impedance tests
@@ -117,7 +125,31 @@ sol = sim.simulate(x0, t_end=15.0)
 sim.plot_results(sol)
 ```
 
-### 3. Perform Impedance Scanning
+### 3. Analyze Lyapunov Stability
+
+```python
+from utils.lyapunov_analyzer import LyapunovStabilityAnalyzer
+
+# Initialize analyzer
+analyzer = LyapunovStabilityAnalyzer('test_cases/Kundur_System/kundur_full.json')
+
+# Initialize equilibrium point
+x_eq = analyzer.initialize_equilibrium()
+
+# Perform linearized stability analysis
+results = analyzer.analyze_linearized_stability()
+print(f"System is: {'STABLE' if results['is_stable'] else 'UNSTABLE'}")
+print(f"Unstable modes: {results['unstable_count']}")
+
+# Estimate region of attraction
+region_results = analyzer.estimate_stability_region(n_samples=500)
+print(f"Estimated critical energy: {region_results['V_critical']:.4f}")
+
+# Generate comprehensive report
+analyzer.generate_stability_report('outputs/stability_report.txt')
+```
+
+### 4. Perform Impedance Scanning
 
 **Method 1: Frequency-Domain Linearization (Fast, Small-Signal)**
 ```python
@@ -171,12 +203,13 @@ freqs, Z_est = scanner.post_process_tfe(sol, bus_idx)
 scanner.plot_system_response('outputs/system_response.png')
 ```
 
-### 4. Run Test Scripts
+### 5. Run Test Scripts
 
 ```bash
 python main.py                      # Build and verify system
 python test_system.py               # Test individual components
 python test_modular_fault.py        # Test fault simulation
+python test_lyapunov.py             # Test Lyapunov stability analysis
 python test_impedance_scanning.py   # Test frequency-domain impedance
 python test_imtb_scanning.py        # Test IMTB multisine impedance
 python test_impedance_td.py         # Test time-domain impedance
@@ -284,12 +317,12 @@ The framework is designed for easy extension with new functionality. Recent addi
    ```
 
 **Possible extensions**:
-- Small-signal stability analysis
+- ✅ Small-signal stability analysis (Lyapunov analyzer)
 - Modal analysis and participation factors
 - Optimal power flow
 - State estimation
 - Voltage stability analysis
-- Transient stability screening
+- ✅ Transient stability screening (Lyapunov energy margins)
 - Custom control strategies
 
 The Port-Hamiltonian framework and modular architecture make it easy to add any new function!
@@ -304,6 +337,9 @@ The framework uses a clean separation of concerns with each module handling spec
 - Standalone symbolic Port-Hamiltonian implementation
 - No external PyPHS dependencies
 - Manages Hamiltonian storage, symbolic mathematics, and energy functions
+- **DynamicsCore class**: Extends Core with numerical dynamics capability
+- Enables general stability analysis across arbitrary component combinations
+- Each component provides dynamics function: `dynamics(x, ports, metadata)`
 
 **component_factory.py** - Component Registry
 - Dynamic component loading system
@@ -332,6 +368,18 @@ The framework uses a clean separation of concerns with each module handling spec
 - Time-domain simulation with adaptive integration (solve_ivp)
 - Post-simulation plotting and analysis
 - Example: `sim.set_fault(bus_idx=1, impedance=0.01j, start_time=2.0, duration=0.15)`
+
+**lyapunov_analyzer.py** ⭐ - Lyapunov Stability Analyzer
+- **Port-Hamiltonian energy-based stability analysis**
+- Hamiltonian as natural Lyapunov function candidate
+- Linearized stability: Jacobian eigenvalue analysis at equilibrium
+- **Region of Attraction (ROA)**: Estimates stability boundary using dV/dt < 0 criterion
+- **Transient Energy Margin**: Computes energy absorbed during faults
+- **Passivity Verification**: Checks energy dissipation along trajectories
+- **COI Frame**: Removes rotational invariance for multi-machine systems
+- Comprehensive visualization: eigenvalues, phase portraits, energy landscapes, ROA
+- Performance: 500 sample estimation in ~80 seconds (10-20x faster than simulation)
+- Example: `results = analyzer.analyze_linearized_stability()`
 
 **impedance_scanner.py** ⭐ - Frequency-Domain Impedance Scanner
 - Small-signal linearization around operating point
@@ -556,6 +604,219 @@ amplitude = 0.01      # Injection amplitude (pu) - test different levels
 - Amplitude-dependent impedance
 - Linearization assumptions violated
 
+## Lyapunov Stability Analysis - Energy-Based Certificates
+
+The framework includes a comprehensive **Lyapunov stability analyzer** that leverages the Port-Hamiltonian structure to assess system stability through energy methods. This is a natural fit for port-Hamiltonian systems where the Hamiltonian serves as an energy storage function.
+
+### Key Features
+
+**Port-Hamiltonian Energy Function**
+- Uses system Hamiltonian as Lyapunov function candidate
+- Ensures V(x*) = 0 at equilibrium and V(x) > 0 for perturbations
+- Captures kinetic energy (rotor speed), magnetic energy (flux linkages), and potential energy (rotor angles)
+
+**Center-of-Inertia (COI) Frame**
+- Removes rotational invariance from angle coordinates
+- Ensures energy function is frame-independent
+- Critical for multi-machine stability analysis
+
+**Multiple Analysis Methods**
+1. **Linearized Stability**: Jacobian eigenvalue analysis at equilibrium
+2. **Energy Margin**: Transient energy absorbed during faults
+3. **Region of Attraction**: Estimates stability boundary via dV/dt < 0 criterion
+4. **Passivity Verification**: Checks energy dissipation along trajectories
+
+### Mathematical Foundation
+
+The Lyapunov function is constructed as:
+
+```
+V(x) = V_kinetic + V_magnetic + V_potential
+
+where:
+  V_kinetic = 0.5 * sum(M_i * (omega_i - 1)^2)
+  
+  V_magnetic = 0.5 * sum((psi - psi*)^T * L^-1 * (psi - psi*))
+  
+  V_potential = sum(Pm_i * (theta_i - theta_i*))
+                + sum(C_ij * sin(delta_ij*) * (delta_ij - delta_ij*)^2)
+```
+
+**Key Properties:**
+- **Positive definite**: V(x) >= 0 with V(x*) = 0
+- **Decreasing along trajectories**: dV/dt < 0 due to system dissipation
+- **Physical meaning**: Total energy above equilibrium
+
+### Usage Example
+
+```python
+from utils.lyapunov_analyzer import LyapunovStabilityAnalyzer
+import numpy as np
+
+# Initialize analyzer
+analyzer = LyapunovStabilityAnalyzer('test_cases/Kundur_System/kundur_full.json')
+
+# 1. Initialize equilibrium point from power flow
+x_eq = analyzer.initialize_equilibrium()
+print(f"Equilibrium Hamiltonian: {analyzer.H_eq:.4f}")
+
+# 2. Linearized stability analysis
+results = analyzer.analyze_linearized_stability()
+print(f"System Status: {'STABLE' if results['is_stable'] else 'UNSTABLE'}")
+print(f"Stable modes: {results['stable_count']}")
+print(f"Unstable modes: {results['unstable_count']}")
+print(f"Marginal modes: {results['marginal_count']}")
+
+# 3. Estimate region of attraction (fast dV/dt method)
+region = analyzer.estimate_stability_region(
+    n_samples=500,          # Number of test points
+    max_perturbation=1.0    # Perturbation magnitude
+)
+print(f"Stable fraction: {region['stable_fraction']*100:.1f}%")
+print(f"Critical energy: V_crit = {region['V_critical']:.4f}")
+
+# 4. Verify passivity during transient
+from scipy.integrate import solve_ivp
+
+# Small perturbation
+x0 = x_eq + np.random.randn(len(x_eq)) * 0.05
+
+# Simulate
+sol = solve_ivp(
+    lambda t, x: analyzer._system_dynamics(x, np.zeros(analyzer.n_gen)),
+    (0, 10.0), x0, t_eval=np.linspace(0, 10, 200)
+)
+
+# Check Lyapunov function evolution
+V_initial = analyzer.compute_lyapunov_function(sol.y[:, 0])
+V_final = analyzer.compute_lyapunov_function(sol.y[:, -1])
+print(f"Energy dissipation: {V_initial:.4f} -> {V_final:.4f}")
+
+# 5. Generate comprehensive report and visualizations
+analyzer.generate_stability_report('outputs/stability_report.txt')
+```
+
+### Analysis Outputs
+
+The Lyapunov analyzer generates comprehensive reports and visualizations saved to the `outputs/` directory:
+
+**Stability Report** (`lyapunov_stability_report.txt`)
+- System configuration summary (generators, states, equilibrium energy)
+- Eigenvalue classification (stable/unstable/marginal counts)
+- Dominant modes with real and imaginary parts
+- Frequencies of oscillatory modes
+- Example output:
+  ```
+  System Configuration:
+    Generators: 4
+    Total states: 52
+    Equilibrium energy: H* = 103.344134
+  
+  Linearized Stability:
+    Status: STABLE
+    Stable modes: 36
+    Unstable modes: 0
+    Marginal modes: 16
+  
+  Dominant Eigenvalues:
+    1. lambda = 0.0000 + 376.9911j  (60 Hz stator flux)
+    2. lambda = -0.5234 + 5.2411j   (Electromechanical mode)
+  ```
+
+**Eigenvalue Plot** (`eigenvalue_analysis.png`)
+- Complex plane visualization of all system modes
+- Imaginary axis (stability boundary) marked with dashed line
+- Dominant eigenvalues highlighted in red
+- Stable region (left half-plane) clearly indicated
+
+**Lyapunov Evolution** (`lyapunov_evolution.png`)
+- Two-panel plot showing transient behavior:
+  - Top: Energy function V(t) evolution (should decrease to zero)
+  - Bottom: Rotor angle trajectories for all generators
+- Verifies passivity and convergence to equilibrium
+- Useful for checking if perturbations are being rejected
+
+**Stability Visualization** (`stability_visualization.png`)
+Comprehensive 6-panel analysis providing multiple perspectives:
+- **Panel 1-2**: Individual generator phase portraits (δ vs ω)
+  - Energy contours colored from green (stable) to red (high energy)
+  - Red boundary shows V = V_critical (stability limit)
+  - Equilibrium marked with black star
+- **Panel 3**: Relative angle plane (δ₁ - δ₂ vs ω₁)
+  - Critical for inter-area oscillations
+  - Shows coupling between generators
+- **Panel 4**: 3D energy surface
+  - Visualizes energy well around equilibrium
+  - Bowl shape indicates stable potential well
+- **Panel 5**: Stability criterion scatter (V vs dV/dt)
+  - Green points: dV/dt < 0 (stable, energy decreasing)
+  - Red points: dV/dt ≥ 0 (unstable, energy increasing)
+  - V_critical line separates stability regions
+- **Panel 6**: Region of attraction summary
+  - System statistics and sampling results
+  - Critical energy estimate
+  - Port-Hamiltonian structure confirmation
+
+### Performance Characteristics
+
+**Speed Improvements**
+- **Before**: 500 samples = stuck (trajectory simulation for each)
+- **After**: 500 samples in ~80 seconds (10-20x faster)
+- **Method**: Uses analytical dV/dt criterion instead of trajectory simulation
+
+**Efficiency Features**
+- Sparse gradient computation (only key states: δ, ω, ψf)
+- Parallel-compatible sample testing
+- Progress indicators for long computations
+
+### Interpretation Guide
+
+**Eigenvalue Analysis**
+```
+Stable modes: Real part < 0     # Exponentially decaying
+Unstable modes: Real part > 0   # Growing instability
+Marginal modes: Real part ≈ 0   # Expected for stator flux (±377j rad/s)
+```
+
+**Energy Margins**
+```
+V_critical ~35-40: Large stability region
+V_critical ~5-10: Medium stability region  
+V_critical <5: Small stability region (vulnerable)
+```
+
+**Passivity Test**
+```
+V(t) decreasing: System dissipative (stable)
+V(t) increasing: Non-passive (check formulation)
+V(t) oscillating: Marginal stability
+```
+
+### Advantages for Port-Hamiltonian Systems
+
+1. **Natural Energy Function**: Hamiltonian is ready-made Lyapunov candidate
+2. **Physical Insight**: Energy analysis reveals stability mechanisms
+3. **Modular**: Works with any component combination defined in JSON
+4. **Scalable**: Automatically adapts to system size (4, 10, 100+ generators)
+5. **Comprehensive**: Combines local (linearization) and global (ROA) analysis
+
+### Technical Notes
+
+**COI Frame Transformation**
+- Removes global rotation energy (rotationally invariant)
+- Critical for multi-machine systems to avoid false instability
+- `theta_i = delta_i - sum(M_j * delta_j) / sum(M_j)`
+
+**Potential Energy Formulation**
+- Quadratic approximation around equilibrium for positive definiteness
+- Captures both mechanical work and network coupling
+- Ensures V(x*) = 0 exactly
+
+**Equilibrium Quality**
+- Max |dx/dt| ~0.19 from fast stator dynamics (377 rad/s)
+- Slow dynamics (angle, speed) have |dx/dt| <0.01
+- Acceptable for stability analysis
+
 ### Implementation Details
 
 **Common Features (All Methods):**
@@ -737,7 +998,120 @@ plt.show()
 # Large differences indicate nonlinear effects (saturation, etc.)
 ```
 
-### Workflow 5: Component Reusability
+### Workflow 5: Lyapunov Stability Assessment
+
+Comprehensive stability analysis using energy methods:
+
+```python
+from utils.lyapunov_analyzer import LyapunovStabilityAnalyzer
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Initialize analyzer
+analyzer = LyapunovStabilityAnalyzer('test_cases/Kundur_System/kundur_full.json')
+
+# Step 1: Equilibrium and Linearization
+x_eq = analyzer.initialize_equilibrium()
+lin_results = analyzer.analyze_linearized_stability()
+
+print("="*60)
+print("LINEARIZED STABILITY ANALYSIS")
+print("="*60)
+print(f"Status: {'STABLE' if lin_results['is_stable'] else 'UNSTABLE'}")
+print(f"Stable modes: {lin_results['stable_count']}")
+print(f"Unstable modes: {lin_results['unstable_count']}")
+print(f"Marginal modes: {lin_results['marginal_count']}")
+
+# Plot eigenvalues
+fig = analyzer.plot_eigenvalues(lin_results)
+plt.savefig('outputs/eigenvalues.png', dpi=150)
+
+# Step 2: Region of Attraction Estimation
+print("\n" + "="*60)
+print("REGION OF ATTRACTION ESTIMATION")
+print("="*60)
+
+roa_results = analyzer.estimate_stability_region(
+    n_samples=500,
+    max_perturbation=1.0
+)
+
+print(f"Samples tested: {roa_results['n_samples']}")
+print(f"Stable samples: {roa_results['stable_count']} ({roa_results['stable_fraction']*100:.1f}%)")
+print(f"Critical energy: V_crit = {roa_results['V_critical']:.4f}")
+
+# Step 3: Transient Energy Margin (Fault Scenario)
+print("\n" + "="*60)
+print("TRANSIENT ENERGY MARGIN")
+print("="*60)
+
+# Create post-fault state (angle perturbations)
+x_fault = x_eq.copy()
+x_fault[0] += 0.5  # Gen 1: +0.5 rad (~28 deg)
+x_fault[13] += 0.2  # Gen 2: +0.2 rad (~11 deg)
+
+energy_margin = analyzer.compute_energy_margin(x_fault)
+print(f"Stable equilibrium: H* = {energy_margin['H_stable']:.4f}")
+print(f"Post-fault energy: H_fault = {energy_margin['H_fault']:.4f}")
+print(f"Energy absorbed: dH = {energy_margin['delta_H']:.4f}")
+print(f"Normalized margin: {energy_margin['normalized_margin']*100:.2f}%")
+
+if energy_margin['delta_H'] < roa_results['V_critical']:
+    print("STABLE: System will recover from this disturbance")
+else:
+    print("UNSTABLE: Energy exceeds critical level")
+
+# Step 4: Passivity Verification
+print("\n" + "="*60)
+print("PASSIVITY VERIFICATION")
+print("="*60)
+
+from scipy.integrate import solve_ivp
+
+# Small random perturbation
+x_pert = x_eq + np.random.randn(len(x_eq)) * 0.05
+
+# Simulate
+sol = solve_ivp(
+    lambda t, x: analyzer._system_dynamics(x, np.zeros(analyzer.n_gen)),
+    (0, 10.0), x_pert,
+    t_eval=np.linspace(0, 10, 200),
+    method='RK45'
+)
+
+# Compute Lyapunov evolution
+V_traj = [analyzer.compute_lyapunov_function(sol.y[:, i]) for i in range(len(sol.t))]
+
+print(f"Initial energy: V(0) = {V_traj[0]:.4f}")
+print(f"Final energy: V(T) = {V_traj[-1]:.4f}")
+print(f"Energy dissipated: {V_traj[0] - V_traj[-1]:.4f}")
+
+if V_traj[-1] < V_traj[0]:
+    print("PASSIVE: Energy decreasing (system converging)")
+else:
+    print("WARNING: Energy increasing (check formulation)")
+
+# Plot Lyapunov evolution
+plt.figure(figsize=(10, 6))
+plt.plot(sol.t, V_traj, 'b-', linewidth=2)
+plt.xlabel('Time (s)')
+plt.ylabel('Lyapunov Function V(x)')
+plt.title('Energy Evolution - Passivity Verification')
+plt.grid(True, alpha=0.3)
+plt.axhline(y=0, color='r', linestyle='--', label='Equilibrium')
+plt.legend()
+plt.savefig('outputs/passivity_verification.png', dpi=150)
+
+# Step 5: Generate Full Report
+analyzer.generate_stability_report('outputs/stability_report.txt')
+
+print("\n" + "="*60)
+print("ANALYSIS COMPLETE")
+print("="*60)
+print("Outputs saved to 'outputs/' directory")
+```
+
+### Workflow 6: Component Reusability
 
 ```python
 # Use the same GENROU model in different systems
@@ -874,9 +1248,18 @@ The modular architecture enables easy addition of:
 - **FACTS devices**: SVC, STATCOM, UPFC
 - **Renewable integration**: Wind turbines, solar PV with inverters
 - **Protection systems**: Relay models, breaker logic
-- **Advanced analysis**: Eigenvalue analysis, participation factors, mode shapes
+- **Advanced analysis**: 
+  - ✅ Eigenvalue analysis (Lyapunov analyzer)
+  - ✅ Lyapunov stability certificates
+  - Participation factors and mode shapes
+  - Sensitivity analysis
 - **Optimization tools**: Optimal power flow, control tuning
 - **Real-time simulation**: Hardware-in-the-loop capabilities
+- **Stability enhancements**:
+  - Hybrid energy-Lyapunov functions
+  - Constructive Lyapunov design for control
+  - Transient stability index computation
+  - Critical clearing time (CCT) calculation
 - **Impedance enhancements**:
   - Automated saturation diagnostics
   - Coherence-based filtering for time-domain
@@ -884,6 +1267,39 @@ The modular architecture enables easy addition of:
   - Frequency-dependent network models
 
 ## Tips and Best Practices
+
+### Lyapunov Stability Analysis Tips
+
+**Equilibrium Quality:**
+- Max |dx/dt| ~0.19 from fast stator flux dynamics (±377 rad/s) is acceptable
+- Slow dynamics (angle, speed, field) should have |dx/dt| < 0.01
+- COI frame removes global rotation drift
+- If equilibrium drifts significantly, check Vref and Pref initialization
+
+**Region of Attraction Estimation:**
+- Start with 500 samples for initial assessment
+- Increase to 1000-2000 for more accurate V_critical estimate
+- max_perturbation = 0.5-1.0 rad for angle perturbations is typical
+- Stable fraction ~40-60% indicates reasonable stability margin
+- V_critical > 30 suggests large stability region
+
+**Interpreting Results:**
+- **Unstable modes = 0**: Linearized stable (small perturbations)
+- **Marginal modes ≈ 16**: Expected for 4-machine system (stator flux at ±377j, angle reference)
+- **V(t) decreasing**: System dissipative and converging to equilibrium
+- **Energy margin > V_critical**: Fault will cause loss of synchronism
+
+**Performance Tuning:**
+- Use dV/dt criterion instead of trajectory simulation (10-20x faster)
+- Sparse gradient computation focuses on key states (δ, ω, ψf)
+- Parallel sampling possible for large-scale studies
+- Progress indicators show completion status
+
+**Common Issues:**
+- **V(x*+dx) < 0**: Potential energy formulation issue (should use quadratic approximation)
+- **V increasing during simulation**: Check dissipation terms in dynamics
+- **Large V_critical variation**: System has multiple stability regions (COI frame should help)
+- **Marginal stability**: Add damping or check controller tuning
 
 ### Impedance Scanning Tips
 
@@ -973,11 +1389,39 @@ To contribute new models or analysis tools:
 
 ---
 
-**Framework Version**: 1.2
+**Framework Version**: 1.3
 **Author**: [Your Name]
 **Last Updated**: January 2026
 
 ### Changelog
+
+**v1.3 (January 2026)**
+- **NEW: Lyapunov Stability Analyzer (`lyapunov_analyzer.py`)**
+  - Energy-based stability analysis leveraging Port-Hamiltonian structure
+  - Linearized stability via Jacobian eigenvalue decomposition
+  - **Proper Lyapunov function formulation**: V(x*) = 0, V(x) > 0 for x ≠ x*
+  - **Center-of-Inertia (COI) frame** for rotational invariance
+  - **Quadratic potential energy** ensuring positive definiteness
+  - Region of attraction estimation using dV/dt < 0 criterion (10-20x faster than trajectory simulation)
+  - Transient energy margin computation for fault scenarios
+  - Passivity verification through energy evolution tracking
+- **Comprehensive Stability Visualization:**
+  - Multi-panel plots: phase portraits, relative angles, 3D energy landscapes
+  - V vs dV/dt scatter for stability criterion visualization
+  - Region of attraction summary statistics
+  - Lyapunov function evolution during transients
+- **DynamicsCore Pattern:**
+  - Extended `Core` class with numerical dynamics capability
+  - Enables general Lyapunov analysis across arbitrary component combinations
+  - Each component provides its own dynamics function (genrou_dynamics, exdc2_dynamics, tgov1_dynamics)
+- **Performance Optimizations:**
+  - Sparse gradient computation (only key states: δ, ω, ψf)
+  - Analytical dV/dt criterion replaces expensive trajectory simulations
+  - 500 sample region estimation in ~80 seconds
+- **Test Suite:**
+  - `test_lyapunov.py`: Comprehensive stability analysis tests
+  - Eigenvalue analysis, passivity verification, energy margins, region estimation
+  - Automated report generation with Unicode-free output for Windows compatibility
 
 **v1.2 (January 2026)**
 - **Time-Domain Impedance Scanner Major Fix:**

@@ -5,7 +5,7 @@
 System Configuration:
   Generators: 4
   Total states: 52
-  Equilibrium energy: H* = 2923040.795009
+  Equilibrium energy: H* = 103.344134
 
 Linearized Stability:
   Status: STABLE
@@ -14,8 +14,8 @@ Linearized Stability:
   Marginal modes: 16
 
 Dominant Eigenvalues:
-  1. λ = 0.000000 + 376.991118j
-  2. λ = 0.000000 + -376.991118j
-  3. λ = 0.000000 + 0.000000j
-  4. λ = 0.000000 + 0.000000j
-  5. λ = 0.000000 + 0.000000j
+  1. lambda = 0.000000 + 376.991118j
+  2. lambda = 0.000000 + -376.991118j
+  3. lambda = 0.000000 + 0.000000j
+  4. lambda = 0.000000 + 0.000000j
+  5. lambda = 0.000000 + 0.000000j

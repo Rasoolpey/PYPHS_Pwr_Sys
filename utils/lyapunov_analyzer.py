@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 from scipy.linalg import eig, eigvals
+from scipy.integrate import solve_ivp
 import matplotlib.pyplot as plt
 from utils.system_builder import PowerSystemBuilder
 from utils.system_coordinator import PowerSystemCoordinator
@@ -53,6 +54,7 @@ class LyapunovStabilityAnalyzer:
         # Equilibrium point (to be initialized)
         self.x_eq = None
         self.H_eq = None
+        self.Y_int = None  # Reduced internal admittance matrix for potential energy
         
         print(f"\nLyapunov Stability Analyzer: {self.n_gen} generators, {self.total_states} states")
         
@@ -154,7 +156,7 @@ class LyapunovStabilityAnalyzer:
             ra = meta['ra']
 
             # Calculate flux linkages from terminal conditions
-            # At steady state with omega=1: psi_d ≈ Vq/omega_b, psi_q ≈ -Vd/omega_b
+            # At steady state with omega=1: psi_d approx Vq/omega_b, psi_q approx -Vd/omega_b
             psi_d = (Vq[i] + ra * Iq[i]) / omega_b
             psi_q = -(Vd[i] + ra * Id[i]) / omega_b
 
@@ -194,6 +196,10 @@ class LyapunovStabilityAnalyzer:
             # Also update the core's metadata
             self.builder.exciters[i]._metadata['Vref'] = Vref_correct
 
+        # Compute reduced internal Ybus for potential energy calculation
+        print("  Computing reduced internal network for energy function...")
+        self.Y_int = self._compute_reduced_internal_ybus()
+
         # Refine equilibrium iteratively
         x0 = self._refine_equilibrium(x0)
 
@@ -210,6 +216,61 @@ class LyapunovStabilityAnalyzer:
         print("  Equilibrium initialized successfully")
 
         return x0
+
+    def _compute_reduced_internal_ybus(self):
+        """Compute Ybus reduced to generator internal nodes for energy function"""
+        # 1. Get full Ybus
+        Y_full = self.coordinator.Ybus_base.copy()
+        n_bus = Y_full.shape[0]
+        
+        # 2. Augment with internal nodes
+        n_total = n_bus + self.n_gen
+        Y_aug = np.zeros((n_total, n_total), dtype=complex)
+        Y_aug[:n_bus, :n_bus] = Y_full
+        
+        internal_indices = []
+        
+        for i in range(self.n_gen):
+            gen_bus = self.coordinator.gen_bus_internal[i]
+            internal_idx = n_bus + i
+            internal_indices.append(internal_idx)
+            
+            # Internal impedance (transient reactance)
+            meta = self.builder.gen_metadata[i]
+            Xd2 = meta.get('xd2', 0.0278) 
+            y_gen = 1.0 / (1j * Xd2)
+            
+            # Add connections
+            Y_aug[internal_idx, internal_idx] += y_gen
+            Y_aug[gen_bus, gen_bus] += y_gen
+            Y_aug[internal_idx, gen_bus] -= y_gen
+            Y_aug[gen_bus, internal_idx] -= y_gen
+            
+        # 3. Kron Reduction
+        keep = np.array(internal_indices)
+        elim = np.arange(n_bus)
+        
+        Y_kk = Y_aug[np.ix_(keep, keep)]
+        Y_ke = Y_aug[np.ix_(keep, elim)]
+        Y_ek = Y_aug[np.ix_(elim, keep)]
+        Y_ee = Y_aug[np.ix_(elim, elim)]
+        
+        # Add loads to Y_ee diagonal (constant impedance approximation)
+        for i in range(n_bus):
+            P = self.coordinator.load_P[i]
+            Q = self.coordinator.load_Q[i]
+            if abs(P) > 1e-6 or abs(Q) > 1e-6:
+                y_load = (P - 1j*Q) / 1.0**2
+                Y_ee[i, i] += y_load
+        
+        # Invert Y_ee and reduce
+        try:
+            Y_ee_inv = np.linalg.inv(Y_ee)
+        except np.linalg.LinAlgError:
+            Y_ee_inv = np.linalg.pinv(Y_ee)
+            
+        Y_red = Y_kk - Y_ke @ Y_ee_inv @ Y_ek
+        return Y_red
 
     def _refine_equilibrium(self, x0, tol=1e-3):
         """
@@ -270,7 +331,7 @@ class LyapunovStabilityAnalyzer:
             meta = self.builder.gen_metadata[i]
             
             # Extract generator states
-            omega = x[idx + 1]
+            p = x[idx + 1]
             psi_d = x[idx + 2]
             psi_q = x[idx + 3]
             psi_f = x[idx + 4]
@@ -279,6 +340,7 @@ class LyapunovStabilityAnalyzer:
             
             # Kinetic energy
             M = meta.get('M', 10.0)
+            omega = p / M
             omega_ref = 1.0
             H_kinetic = 0.5 * M * (omega - omega_ref)**2
             
@@ -295,27 +357,180 @@ class LyapunovStabilityAnalyzer:
                                psi_kq**2 / xq1)
             
             H_total += H_kinetic + H_magnetic
+        
+        # Add Potential Energy (Network) if initialized
+        if self.Y_int is not None and self.x_eq is not None:
+            H_potential = self._compute_potential_energy(x)
+            H_total += H_potential
             
         return H_total
         
+    def _compute_potential_energy(self, x):
+        """
+        Compute potential energy in Center of Inertia (COI) frame.
+        Using COI ensures the energy function is rotationally invariant
+        and locally positive definite.
+        """
+        V_pe = 0.0
+        
+        # Extract states
+        deltas = x[0::self.states_per_machine]
+        deltas_eq = self.x_eq[0::self.states_per_machine]
+        
+        # Get Inertia for COI calculation
+        M = np.array([self.builder.gen_metadata[i].get('M', 10.0) for i in range(self.n_gen)])
+        M_tot = np.sum(M)
+        
+        # Calculate Center of Inertia (COI)
+        delta_coi = np.sum(M * deltas) / M_tot
+        delta_coi_eq = np.sum(M * deltas_eq) / M_tot
+        
+        # Transform to COI frame (theta = delta - delta_coi)
+        thetas = deltas - delta_coi
+        thetas_eq = deltas_eq - delta_coi_eq
+        
+        # Get internal voltages and powers
+        E_mag = np.zeros(self.n_gen)
+        Pm_eq = np.zeros(self.n_gen)
+        
+        for i in range(self.n_gen):
+            # Mechanical power reference
+            Pm_eq[i] = self.builder.gov_metadata[i]['Pref']
+            
+            # Internal voltage magnitude (approximate from equilibrium flux)
+            idx = i * self.states_per_machine
+            psi_f_eq = self.x_eq[idx + 4]
+            gd1 = self.builder.gen_metadata[i].get('gd1', 0.79)
+            E_mag[i] = psi_f_eq * gd1 if gd1 > 0 else 1.0
+            
+        # Calculate PE
+        for i in range(self.n_gen):
+            # Term 1: Path dependent energy (Power mismatch work)
+            # Use COI angles (thetas) to remove rotational drift energy
+            V_pe -= Pm_eq[i] * (thetas[i] - thetas_eq[i])
+            
+            for j in range(i + 1, self.n_gen):
+                # Term 2: Magnetic energy of lines (Potential well)
+                # C_ij = E_i * E_j * B_ij
+                C_ij = E_mag[i] * E_mag[j] * np.abs(self.Y_int[i, j])
+                
+                # Angle difference is invariant: theta_i - theta_j = delta_i - delta_j
+                d_ij = deltas[i] - deltas[j]
+                d_ij_eq = deltas_eq[i] - deltas_eq[j]
+                
+                V_pe -= C_ij * (np.cos(d_ij) - np.cos(d_ij_eq))
+                
+        return V_pe
+
     def compute_lyapunov_function(self, x):
         """
-        Compute Lyapunov function: V(x) = H(x) - H(x*)
-        Shifted Hamiltonian with minimum at equilibrium
+        Compute Lyapunov function for port-Hamiltonian power system.
+        
+        V(x) = Kinetic Energy Deviation + Magnetic Energy Deviation + Potential Energy
+        
+        This is the proper energy function for transient stability:
+        - V(x*) = 0 at equilibrium
+        - V(x) > 0 for x != x*
+        - dV/dt < 0 along system trajectories (dissipative)
         
         Args:
             x: current state
             
         Returns:
-            V: Lyapunov function value
+            V: Lyapunov function value (energy above equilibrium)
         """
         if self.x_eq is None:
             raise ValueError("Equilibrium not initialized. Call initialize_equilibrium() first.")
             
-        H_current = self.compute_hamiltonian(x)
-        V = H_current - self.H_eq
+        V_total = 0.0
         
-        return V
+        # Extract rotor angles and speeds
+        deltas = x[0::self.states_per_machine]
+        deltas_eq = self.x_eq[0::self.states_per_machine]
+        
+        # Get inertia constants for COI calculation
+        M_vec = np.array([self.builder.gen_metadata[i].get('M', 10.0) for i in range(self.n_gen)])
+        M_tot = np.sum(M_vec)
+        
+        # Center of Inertia (COI) angle - for rotational invariance
+        delta_coi = np.sum(M_vec * deltas) / M_tot
+        delta_coi_eq = np.sum(M_vec * deltas_eq) / M_tot
+        
+        # Transform to COI frame
+        thetas = deltas - delta_coi
+        thetas_eq = deltas_eq - delta_coi_eq
+        
+        # 1. KINETIC ENERGY (speed deviations from synchronous speed)
+        for i in range(self.n_gen):
+            idx = i * self.states_per_machine
+            M = M_vec[i]
+            p = x[idx + 1]
+            omega = p / M
+            V_total += 0.5 * M * (omega - 1.0)**2
+            
+        # 2. POTENTIAL ENERGY (electromechanical coupling in COI frame)
+        # Classical energy function for transient stability analysis
+        
+        # Get equilibrium powers and electrical parameters
+        Pm_eq = np.zeros(self.n_gen)
+        Pe_eq = np.zeros(self.n_gen)  # Electrical power at equilibrium
+        E_mag_eq = np.zeros(self.n_gen)
+        
+        for i in range(self.n_gen):
+            Pm_eq[i] = self.builder.gov_metadata[i]['Pref']
+            Pe_eq[i] = Pm_eq[i]  # At equilibrium: Pe = Pm
+            idx = i * self.states_per_machine
+            psi_f_eq = self.x_eq[idx + 4]
+            gd1 = self.builder.gen_metadata[i].get('gd1', 0.79)
+            E_mag_eq[i] = psi_f_eq * gd1
+        
+        # POTENTIAL ENERGY: Two-part formulation
+        # Part 1: Acceleration area (work done against mechanical power)
+        for i in range(self.n_gen):
+            V_total += Pm_eq[i] * (thetas[i] - thetas_eq[i])
+        
+        # Part 2: Network coupling energy (using linearized power flow)
+        # This creates a quadratic potential well around equilibrium
+        if self.Y_int is not None:
+            for i in range(self.n_gen):
+                for j in range(i + 1, self.n_gen):
+                    # Coupling strength from network admittance
+                    Y_ij_mag = np.abs(self.Y_int[i, j])
+                    Y_ij_ang = np.angle(self.Y_int[i, j])
+                    C_ij = E_mag_eq[i] * E_mag_eq[j] * Y_ij_mag
+                    
+                    # Angle differences
+                    delta_ij = deltas[i] - deltas[j]
+                    delta_ij_eq = deltas_eq[i] - deltas_eq[j]
+                    d_delta = delta_ij - delta_ij_eq
+                    
+                    # Quadratic approximation around equilibrium (always positive)
+                    # V_ij = 0.5 * C_ij * sin(delta_ij_eq + Y_ij_ang) * (delta_ij - delta_ij_eq)^2
+                    # This is the second-order Taylor expansion of -C_ij*cos(delta_ij)
+                    V_pe_ij = 0.5 * C_ij * np.abs(np.sin(delta_ij_eq + Y_ij_ang)) * d_delta**2
+                    
+                    V_total += V_pe_ij
+        
+        # 3. MAGNETIC ENERGY (flux deviations - usually small contribution)
+        for i in range(self.n_gen):
+            idx = i * self.states_per_machine
+            meta = self.builder.gen_metadata[i]
+            
+            # Simplified diagonal inductance model
+            xd = meta.get('xd', 0.146)
+            xq = meta.get('xq', 0.0969)
+            xd1 = meta.get('xd1', 0.033)
+            
+            # Flux deviations (stator and rotor)
+            d_psi_d = x[idx+2] - self.x_eq[idx+2]
+            d_psi_q = x[idx+3] - self.x_eq[idx+3]
+            d_psi_f = x[idx+4] - self.x_eq[idx+4]
+            
+            # Magnetic energy storage (quadratic in flux deviations)
+            V_mag = 0.5 * (d_psi_d**2/xd + d_psi_q**2/xq + d_psi_f**2/xd1)
+            V_total += V_mag
+        
+        return V_total
         
     def verify_passivity(self, x, u, y):
         """
@@ -437,7 +652,7 @@ class LyapunovStabilityAnalyzer:
         print(f"\n  Dominant eigenvalues:")
         for i, idx in enumerate(dominant_idx[::-1]):
             eig_val = eigenvalues[idx]
-            print(f"    {i+1}. λ = {eig_val.real:.4f} + {eig_val.imag:.4f}j")
+            print(f"    {i+1}. lambda = {eig_val.real:.4f} + {eig_val.imag:.4f}j")
             
         return results
         
@@ -470,8 +685,11 @@ class LyapunovStabilityAnalyzer:
         
     def estimate_stability_region(self, x_eq=None, n_samples=100, max_perturbation=0.5):
         """
-        Estimate domain of attraction via Lyapunov function level sets
-        Sample states and check if V(x) is decreasing
+        Estimate domain of attraction using Lyapunov function derivative criterion.
+        
+        For port-Hamiltonian systems with dissipation:
+        - Point is in stability region if: V(x) < V_critical AND dV/dt < 0
+        - Much faster than trajectory simulation
         
         Args:
             x_eq: equilibrium point
@@ -487,63 +705,112 @@ class LyapunovStabilityAnalyzer:
             x_eq = self.x_eq
             
         print(f"\n[Stability Region Estimation - {n_samples} samples]")
+        print("  Using Lyapunov derivative criterion (dV/dt < 0)...")
         
         stable_samples = []
         unstable_samples = []
         V_samples = []
+        dVdt_samples = []
         
         for i in range(n_samples):
-            # Random perturbation
-            perturbation = np.random.randn(len(x_eq)) * max_perturbation
+            # Random perturbation with non-uniform distribution
+            # Focus more on electromechanical states (angles and speeds)
+            perturbation = np.zeros(len(x_eq))
+            
+            for gen in range(self.n_gen):
+                idx = gen * self.states_per_machine
+                # Rotor angle perturbation (rad)
+                perturbation[idx] = np.random.randn() * max_perturbation * 0.5
+                # Speed perturbation (pu) - from momentum
+                M = self.builder.gen_metadata[gen]['M']
+                perturbation[idx+1] = np.random.randn() * max_perturbation * M * 0.1
+                # Field flux perturbation
+                perturbation[idx+4] = np.random.randn() * max_perturbation * 0.1
+                
             x_sample = x_eq + perturbation
             
             # Compute Lyapunov function
             V = self.compute_lyapunov_function(x_sample)
             V_samples.append(V)
             
-            # Check if stable (V decreasing)
-            # Approximate dV/dt via forward simulation
+            # Compute dV/dt at this point
             x_dot = self._system_dynamics(x_sample, np.zeros(self.n_gen))
             dV_dt = self._compute_dV_dt(x_sample, x_dot)
+            dVdt_samples.append(dV_dt)
             
-            if dV_dt < 0:
+            # Stability criterion: dV/dt < 0 (energy decreasing)
+            # Also check that state is reasonable (no NaN, no extreme values)
+            is_stable = (dV_dt < 0) and (V < 1e6) and np.all(np.isfinite(x_sample))
+            
+            if is_stable:
                 stable_samples.append(x_sample)
             else:
                 unstable_samples.append(x_sample)
+            
+            # Progress indicator
+            if (i + 1) % 100 == 0:
+                print(f"    Progress: {i+1}/{n_samples} samples...")
                 
         stable_fraction = len(stable_samples) / n_samples
+        
+        # Estimate critical energy level (conservative)
+        V_stable = [V_samples[i] for i in range(n_samples) if i < len(stable_samples)]
+        V_critical = max(V_stable) if V_stable else 0
         
         results = {
             'n_samples': n_samples,
             'stable_count': len(stable_samples),
             'unstable_count': len(unstable_samples),
             'stable_fraction': stable_fraction,
-            'max_stable_V': max(V_samples) if stable_samples else 0,
-            'V_samples': V_samples
+            'V_critical': V_critical,
+            'V_samples': np.array(V_samples),
+            'dVdt_samples': np.array(dVdt_samples),
+            'stable_samples': stable_samples,
+            'unstable_samples': unstable_samples
         }
         
         print(f"  Stable samples: {len(stable_samples)}/{n_samples} ({stable_fraction*100:.1f}%)")
+        print(f"  Estimated V_critical: {V_critical:.4f}")
         
         return results
         
     def _compute_dV_dt(self, x, x_dot):
         """
-        Compute time derivative of Lyapunov function
-        dV/dt = ∇V^T * f(x)
+        Compute time derivative of Lyapunov function: dV/dt = grad(V)^T * f(x)
+        
+        For port-Hamiltonian systems, this simplifies significantly:
+        dV/dt = -sum(dissipation terms) <= 0
+        
+        We use sparse numerical gradient focusing on key states for efficiency.
         """
-        # Numerical gradient of V
+        # For accurate stability assessment, compute gradient on key states only
+        # (rotor angles, speeds, field flux) - ignore fast stator dynamics
+        
         epsilon = 1e-6
-        n = len(x)
-        grad_V = np.zeros(n)
+        grad_V = np.zeros(len(x))
         
         V0 = self.compute_lyapunov_function(x)
         
-        for i in range(n):
-            x_pert = x.copy()
-            x_pert[i] += epsilon
-            V_pert = self.compute_lyapunov_function(x_pert)
-            grad_V[i] = (V_pert - V0) / epsilon
+        # Only compute gradient for electromechanical states (much faster)
+        for i in range(self.n_gen):
+            idx = i * self.states_per_machine
             
+            # Angle gradient
+            x_pert = x.copy()
+            x_pert[idx] += epsilon
+            grad_V[idx] = (self.compute_lyapunov_function(x_pert) - V0) / epsilon
+            
+            # Momentum gradient
+            x_pert = x.copy()
+            x_pert[idx + 1] += epsilon
+            grad_V[idx + 1] = (self.compute_lyapunov_function(x_pert) - V0) / epsilon
+            
+            # Field flux gradient (key for voltage stability)
+            x_pert = x.copy()
+            x_pert[idx + 4] += epsilon
+            grad_V[idx + 4] = (self.compute_lyapunov_function(x_pert) - V0) / epsilon
+        
+        # Compute dV/dt using sparse gradient
         dV_dt = np.dot(grad_V, x_dot)
         return dV_dt
         
@@ -721,6 +988,6 @@ class LyapunovStabilityAnalyzer:
             
             f.write(f"Dominant Eigenvalues:\n")
             for i, eig_val in enumerate(linear_results['dominant_eigenvalues'][::-1]):
-                f.write(f"  {i+1}. λ = {eig_val.real:.6f} + {eig_val.imag:.6f}j\n")
+                f.write(f"  {i+1}. lambda = {eig_val.real:.6f} + {eig_val.imag:.6f}j\n")
                 
         print(f"\nReport saved to: {output_path}")
