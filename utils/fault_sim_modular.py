@@ -351,6 +351,19 @@ class ModularFaultSimulator:
             x0[i, 12] = P_gen[i]  # x2 (governor state)
             self.builder.gov_metadata[i]['Pref'] = P_gen[i]
 
+            # Update Vref to maintain equilibrium Efd
+            # At equilibrium: d(Efd)/dt = 0 => KA*(Vref - Vt) = Efd
+            # So: Vref = Vt + Efd/KA
+            exc_core = self.builder.exciters[i]
+            KA = self._get_param(exc_core, 'KA', 200.0)
+            Efd_eq = x0[i, 8]
+            Vref_correct = V_mag[i] + Efd_eq / KA
+
+            for key in exc_core.subs.keys():
+                if 'Vref' in str(key):
+                    exc_core.subs[key] = Vref_correct
+                    break
+
         print("\nEquilibrium:")
         for i in range(self.n_gen):
             print(f"  Gen {i}: delta={np.degrees(delta_vals[i]):.2f} deg, P={P_gen[i]:.3f} pu, V={V_mag[i]:.4f} pu, psi_f={psi_f_vals[i]:.3f}")

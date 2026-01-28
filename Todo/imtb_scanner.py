@@ -557,11 +557,17 @@ class IMTBScanner:
             # Update Pref in gov_metadata (this is used by dynamics)
             self.builder.gov_metadata[i]['Pref'] = P_eq
             
-            # Update Vref in exciter core.subs (used by dynamics)
+            # Update Vref to maintain equilibrium Efd
+            # At equilibrium: d(Efd)/dt = 0 => KA*(Vref - Vt) = Efd
+            # So: Vref = Vt + Efd/KA
             exc_core = self.builder.exciters[i]
+            KA = self._extract_param(exc_core, 'KA', 200.0)
+            Efd_eq = x0[i, 8]
+            Vref_correct = V_mag[i] + Efd_eq / KA
+
             for key in exc_core.subs.keys():
                 if 'Vref' in str(key):
-                    exc_core.subs[key] = V_mag[i]
+                    exc_core.subs[key] = Vref_correct
                     break
         
         print("Equilibrium:")

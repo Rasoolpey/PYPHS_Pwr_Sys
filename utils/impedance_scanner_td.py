@@ -41,6 +41,7 @@ class ImpedanceScannerTD:
 
     def _solve_network_with_injection(self, gen_states, target_bus, I_inj_dq):
         """Network solver with dq-frame current injection.
+        Uses the same approach as system_coordinator.solve_network() with full network.
 
         Args:
             gen_states: Generator states (n_gen x 7)
@@ -52,70 +53,132 @@ class ImpedanceScannerTD:
             Vd, Vq, Id, Iq: DQ frame voltages and currents
             V_term: Network frame (RI) terminal voltages
         """
-        # 1. Setup Matrices
-        Ybus = self.coordinator.Ybus_base
-        Xd2 = 0.25 * (100.0 / 900.0)
-        y_gen = 1.0 / (1j * Xd2)
+        Y_full = self.coordinator.Ybus_base.copy()
+        deltas = gen_states[:, 0]
 
-        # 2. Internal Voltages
-        E_sys = np.zeros(self.n_gen, dtype=complex)
+        # Get generator internal admittances from metadata (already on system base)
+        y_gen_internal = np.zeros(self.n_gen, dtype=complex)
         for i in range(self.n_gen):
             meta = self.builder.gen_metadata[i]
-            delta, _, _, _, psi_f, psi_kd, psi_kq = gen_states[i]
-            psi2d = meta['gd1'] * psi_f + meta['gd2'] * (meta['xd1'] - meta['xl']) * psi_kd
-            psi2q = (1 - meta['gq1']) * psi_kq
-            E_int = psi2d + 1j * psi2q
-            E_sys[i] = (np.real(E_int) * np.cos(delta) - np.imag(E_int) * np.sin(delta)) + \
-                       1j * (np.real(E_int) * np.sin(delta) + np.imag(E_int) * np.cos(delta))
+            Xd2_sys = meta.get('xd2', 0.0278)  # Already on system base
+            y_gen_internal[i] = 1.0 / (1j * Xd2_sys)
 
-        # 3. Transform injection from DQ to RI (network) frame
-        I_inj_net = 0j
-        if target_bus >= 0 and I_inj_dq != 0j:
-            delta_target = gen_states[target_bus, 0]
+        # Build internal voltages from flux linkages (E'' in machine frame)
+        E_internal = np.zeros(self.n_gen, dtype=complex)
+        for i in range(self.n_gen):
+            meta = self.builder.gen_metadata[i]
+            psi_f = gen_states[i, 4] if gen_states.shape[1] > 4 else 1.0
+            psi_kq = gen_states[i, 6] if gen_states.shape[1] > 6 else 0
+
+            xd2 = meta.get('xd2', 0.0278)
+            xd1 = meta.get('xd1', 0.033)
+            xl = meta.get('xl', 0.0067)
+            xq2 = meta.get('xq2', 0.0278)
+            xq1 = meta.get('xq1', 0.061)
+
+            # E''_q = (xd'' - xl)/(xd' - xl) * psi_f
+            if (xd1 - xl) > 1e-6:
+                Eq2 = (xd2 - xl) / (xd1 - xl) * psi_f
+            else:
+                Eq2 = psi_f
+
+            # E''_d from q-axis damper
+            if (xq1 - xl) > 1e-6:
+                Ed2 = -(xq2 - xl) / (xq1 - xl) * psi_kq
+            else:
+                Ed2 = 0.0
+
+            E_internal[i] = Ed2 + 1j * Eq2
+
+        # Transform internal voltages to system frame (dq -> RI)
+        E_sys = np.zeros(self.n_gen, dtype=complex)
+        for i in range(self.n_gen):
+            e_d = np.real(E_internal[i])
+            e_q = np.imag(E_internal[i])
+            delta = deltas[i]
+            E_sys[i] = (e_d * np.sin(delta) + e_q * np.cos(delta)) + \
+                      1j * (-e_d * np.cos(delta) + e_q * np.sin(delta))
+
+        # Build augmented Y matrix: Y_full + generator admittances on diagonal
+        Y_aug = Y_full.copy()
+        for i in range(self.n_gen):
+            gen_bus = self.coordinator.gen_bus_internal[i]
+            Y_aug[gen_bus, gen_bus] += y_gen_internal[i]
+
+        # Current injection from generators: I_inj = Y_gen * E
+        I_inj = np.zeros(self.coordinator.n_bus, dtype=complex)
+        for i in range(self.n_gen):
+            gen_bus = self.coordinator.gen_bus_internal[i]
+            I_inj[gen_bus] += y_gen_internal[i] * E_sys[i]
+
+        # Add external current injection at target bus
+        if target_bus >= 0 and target_bus < self.n_gen and I_inj_dq != 0j:
+            delta_target = deltas[target_bus]
+            gen_bus_target = self.coordinator.gen_bus_internal[target_bus]
             Id_inj = np.real(I_inj_dq)
             Iq_inj = np.imag(I_inj_dq)
-            # Park transformation: dq -> RI (same as other scanners)
-            I_inj_net = (Id_inj * np.cos(delta_target) - Iq_inj * np.sin(delta_target)) + \
-                        1j * (Id_inj * np.sin(delta_target) + Iq_inj * np.cos(delta_target))
+            # Transform dq injection to network RI frame
+            I_inj_R = Id_inj * np.sin(delta_target) + Iq_inj * np.cos(delta_target)
+            I_inj_I = -Id_inj * np.cos(delta_target) + Iq_inj * np.sin(delta_target)
+            I_inj[gen_bus_target] += I_inj_R + 1j * I_inj_I
 
-        # 4. Iterative Solve (match fault_sim_modular)
-        I_gen_source = E_sys * y_gen
-        S_load = self.coordinator.load_P + 1j * self.coordinator.load_Q
-        V_term = np.ones(self.n_gen, dtype=complex)
-        Y_total = Ybus + np.eye(self.n_gen) * y_gen
+        # Iterative solution with constant power loads
+        V_bus = np.ones(self.coordinator.n_bus, dtype=complex)
 
-        # First iteration
-        I_load = np.conj(S_load / V_term)
-        I_rhs = I_gen_source - I_load
-        if target_bus >= 0:
-            I_rhs[target_bus] += I_inj_net
-        V_term = np.linalg.solve(Y_total, I_rhs)
+        for iteration in range(10):
+            # Calculate load current injection (constant power model)
+            I_load = np.zeros(self.coordinator.n_bus, dtype=complex)
+            for lb in range(self.coordinator.n_bus):
+                P = self.coordinator.load_P[lb]
+                Q = self.coordinator.load_Q[lb]
+                if abs(P) > 1e-6 or abs(Q) > 1e-6:
+                    S_load = P + 1j * Q
+                    if abs(V_bus[lb]) > 0.1:
+                        I_load[lb] = np.conj(S_load / V_bus[lb])
 
-        # Refine (2nd iteration with safety)
-        V_safe = np.where(np.abs(V_term) > 0.5, V_term, np.ones(self.n_gen, dtype=complex))
-        I_load = np.conj(S_load / V_safe)
-        I_rhs = I_gen_source - I_load
-        if target_bus >= 0:
-            I_rhs[target_bus] += I_inj_net
-        V_term = np.linalg.solve(Y_total, I_rhs)
-            
-        # 4. Currents
-        I_out = (E_sys - V_term) * y_gen
+            # Total current: generator injection minus load
+            I_total = I_inj - I_load
 
+            # Solve for bus voltages
+            try:
+                V_bus_new = np.linalg.solve(Y_aug, I_total)
+            except np.linalg.LinAlgError:
+                break
+
+            # Check convergence
+            if np.max(np.abs(V_bus_new - V_bus)) < 1e-6:
+                V_bus = V_bus_new
+                break
+            V_bus = V_bus_new
+
+        # Get terminal voltage for each generator
+        V_term = np.zeros(self.n_gen, dtype=complex)
+        for i in range(self.n_gen):
+            gen_bus = self.coordinator.gen_bus_internal[i]
+            V_term[i] = V_bus[gen_bus]
+
+        # Calculate generator output current: I = Y_gen * (E - V)
+        I_out = y_gen_internal * (E_sys - V_term)
+
+        # Inverse Park transformation (system to machine frame)
         Vd = np.zeros(self.n_gen)
         Vq = np.zeros(self.n_gen)
         Id = np.zeros(self.n_gen)
         Iq = np.zeros(self.n_gen)
 
-        deltas = gen_states[:, 0]
         for i in range(self.n_gen):
             delta = deltas[i]
-            v_r, v_i = np.real(V_term[i]), np.imag(V_term[i])
-            i_r, i_i = np.real(I_out[i]), np.imag(I_out[i])
-            Vd[i] = v_r * np.cos(delta) + v_i * np.sin(delta)
-            Vq[i] = -v_r * np.sin(delta) + v_i * np.cos(delta)
-            Id[i] = i_r * np.cos(delta) + i_i * np.sin(delta)
-            Iq[i] = -i_r * np.sin(delta) + i_i * np.cos(delta)
+            V_R = np.real(V_term[i])
+            V_I = np.imag(V_term[i])
+            I_R = np.real(I_out[i])
+            I_I = np.imag(I_out[i])
+
+            # Inverse Park: X_d = X_R*sin(delta) - X_I*cos(delta)
+            #               X_q = X_R*cos(delta) + X_I*sin(delta)
+            Vd[i] = V_R * np.sin(delta) - V_I * np.cos(delta)
+            Vq[i] = V_R * np.cos(delta) + V_I * np.sin(delta)
+            Id[i] = I_R * np.sin(delta) - I_I * np.cos(delta)
+            Iq[i] = I_R * np.cos(delta) + I_I * np.sin(delta)
 
         # Return V_term (RI frame) along with dq quantities for impedance measurement
         return Vd, Vq, Id, Iq, V_term
@@ -215,129 +278,250 @@ class ImpedanceScannerTD:
         return t, filtered_d, filtered_q
 
     def _initialize_equilibrium(self):
-        """Proper equilibrium initialization (same as fault_sim_modular)"""
-        print("  Finding equilibrium...")
-        
-        P_targets = np.array([7.459, 7.0, 7.0, 7.0])
-        delta_init = np.array([0.08, 0.07, 0.06, 0.07])
-        psi_f_init = np.array([1.3, 1.3, 1.3, 1.3])
-        
-        for iteration in range(50):
-            gen_states = np.zeros((self.n_gen, 7))
-            for i in range(self.n_gen):
-                M = self.builder.gen_metadata[i]['M']
-                gen_states[i] = [delta_init[i], M * 1.0, 0.0, 0.0, psi_f_init[i], 0.0, 0.0]
-            
-            Vd, Vq, Id, Iq, _ = self._solve_network_with_injection(gen_states, -1, 0j)
-            P_calc = Vd * Id + Vq * Iq
-            V_mag = np.sqrt(Vd**2 + Vq**2)
-            
-            max_error = 0
-            for i in range(self.n_gen):
-                P_error = P_targets[i] - P_calc[i]
-                delta_init[i] += 0.02 * P_error
-                
-                V_error = 1.0 - V_mag[i]
-                psi_f_init[i] += 0.1 * V_error
-                psi_f_init[i] = np.clip(psi_f_init[i], 0.5, 2.0)
-                
-                max_error = max(max_error, abs(P_error))
-            
-            if max_error < 1e-4:
-                break
-        
-        # Print equilibrium diagnostics
-        print(f"  Equilibrium voltages: {V_mag}")
-        print(f"  Equilibrium powers: {P_calc}")
-        
-        # Build full state
-        x0 = np.zeros((self.n_gen, 13))
+        """Initialize equilibrium from power flow results in JSON.
+
+        Uses direct calculation from power flow:
+        - V, theta from bus data
+        - P, Q from generator data
+        - Calculate E'' and delta from: E'' = V + jXd'' * I
+        """
+        print("  Finding equilibrium from power flow...")
+
+        system_data = self.builder.system_data
+        gen_to_bus = self.coordinator.gen_to_bus
+
+        # Get bus voltage data
+        bus_data = {b['idx']: b for b in system_data.get('Bus', [])}
+        slack_data = {s['bus']: s for s in system_data.get('Slack', [])}
+        pv_data = {p['bus']: p for p in system_data.get('PV', [])}
+
+        # Arrays for results
+        delta_vals = np.zeros(self.n_gen)
+        psi_f_vals = np.zeros(self.n_gen)
+        V_mag = np.zeros(self.n_gen)
+        V_ang = np.zeros(self.n_gen)
+        P_gen = np.zeros(self.n_gen)
+        Q_gen = np.zeros(self.n_gen)
+        Id = np.zeros(self.n_gen)
+        Iq = np.zeros(self.n_gen)
+        Vd = np.zeros(self.n_gen)
+        Vq = np.zeros(self.n_gen)
+
         for i in range(self.n_gen):
             meta = self.builder.gen_metadata[i]
-            psi_q = (-Vd[i] - meta['ra'] * Id[i]) / meta['omega_b']
-            psi_d = (Vq[i] + meta['ra'] * Iq[i]) / meta['omega_b']
-            
-            x0[i, 0] = delta_init[i]
-            x0[i, 1] = meta['M'] * 1.0
+            bus_idx = gen_to_bus[i]
+
+            # Get terminal voltage from power flow
+            if bus_idx in bus_data:
+                V_mag[i] = bus_data[bus_idx].get('v0', 1.0)
+                V_ang[i] = bus_data[bus_idx].get('a0', 0.0)
+            else:
+                V_mag[i] = 1.0
+                V_ang[i] = 0.0
+
+            # Get power from power flow
+            if bus_idx in slack_data:
+                P_gen[i] = slack_data[bus_idx].get('p0', 0.0)
+                Q_gen[i] = slack_data[bus_idx].get('q0', 0.0)
+            elif bus_idx in pv_data:
+                P_gen[i] = pv_data[bus_idx].get('p0', 0.0)
+                Q_gen[i] = pv_data[bus_idx].get('q0', 0.0)
+            else:
+                P_gen[i] = 7.0  # Default fallback
+                Q_gen[i] = 1.0
+
+            # Generator parameters (already on system base in metadata)
+            Xd2 = meta.get('xd2', 0.0278)
+            ra = meta.get('ra', 0.0)
+
+            # Terminal voltage phasor
+            V_phasor = V_mag[i] * np.exp(1j * V_ang[i])
+
+            # Current from power: I = (P - jQ)* / V* = (P + jQ) / V
+            S = P_gen[i] + 1j * Q_gen[i]
+            I_phasor = np.conj(S / V_phasor)
+
+            # Internal voltage: E'' = V + (ra + jXd'') * I
+            Z_gen = ra + 1j * Xd2
+            E_phasor = V_phasor + Z_gen * I_phasor
+
+            # Rotor angle delta is the angle of E''
+            delta_vals[i] = np.angle(E_phasor)
+
+            # E'' magnitude relates to psi_f through gd1 coefficient
+            E_mag = np.abs(E_phasor)
+            gd1 = meta.get('gd1', 0.79)
+            psi_f_vals[i] = E_mag / gd1
+
+            # Transform V and I to machine (dq) frame
+            delta = delta_vals[i]
+            V_R = np.real(V_phasor)
+            V_I = np.imag(V_phasor)
+            I_R = np.real(I_phasor)
+            I_I = np.imag(I_phasor)
+
+            Vd[i] = V_R * np.sin(delta) - V_I * np.cos(delta)
+            Vq[i] = V_R * np.cos(delta) + V_I * np.sin(delta)
+            Id[i] = I_R * np.sin(delta) - I_I * np.cos(delta)
+            Iq[i] = I_R * np.cos(delta) + I_I * np.sin(delta)
+
+        # Print equilibrium diagnostics
+        print(f"    Equilibrium: V={V_mag}, P={P_gen}")
+        print(f"    Angles (deg): {np.degrees(delta_vals)}")
+
+        # Build full state vector
+        x0 = np.zeros((self.n_gen, self.states_per_machine))
+
+        for i in range(self.n_gen):
+            meta = self.builder.gen_metadata[i]
+            omega_b = meta['omega_b']
+            M = meta['M']
+            ra = meta['ra']
+
+            # Calculate flux linkages from terminal conditions
+            psi_d = (Vq[i] + ra * Iq[i]) / omega_b
+            psi_q = -(Vd[i] + ra * Id[i]) / omega_b
+
+            # Generator states
+            x0[i, 0] = delta_vals[i]
+            x0[i, 1] = M * 1.0  # p = M * omega (omega=1.0 at equilibrium)
             x0[i, 2] = psi_d
             x0[i, 3] = psi_q
-            x0[i, 4] = psi_f_init[i]
-            x0[i, 7] = V_mag[i]
-            x0[i, 8] = psi_f_init[i]
-            
-            P_eq = P_calc[i]
-            x0[i, 11] = P_eq
-            x0[i, 12] = P_eq
-            self.builder.gov_metadata[i]['Pref'] = P_eq
-            
-            # Update Vref to match equilibrium voltage
-            # This prevents AVR from fighting the equilibrium
+            x0[i, 4] = psi_f_vals[i]
+            x0[i, 5] = 0.0  # psi_kd
+            x0[i, 6] = 0.0  # psi_kq
+
+            # Exciter states
+            x0[i, 7] = V_mag[i]  # vm
+            x0[i, 8] = psi_f_vals[i]  # vr1 (Efd at equilibrium)
+
+            # Clip Efd to saturation limits
+            exc_meta = self.builder.exc_metadata[i]
+            VRMAX = exc_meta.get('VRMAX', 5.2)
+            VRMIN = exc_meta.get('VRMIN', -4.16)
+            x0[i, 8] = np.clip(x0[i, 8], VRMIN, VRMAX)
+
+            x0[i, 9] = 0.0  # vr2
+            x0[i, 10] = 0.0  # vf
+
+            # Governor states
+            x0[i, 11] = P_gen[i]  # x1
+            x0[i, 12] = P_gen[i]  # x2
+            self.builder.gov_metadata[i]['Pref'] = P_gen[i]
+
+            # Update Vref to maintain equilibrium Efd
+            # At equilibrium: d(Efd)/dt = 0 => KA*(Vref - Vt) = Efd
+            # So: Vref = Vt + Efd/KA
             exc_core = self.builder.exciters[i]
+            KA = self._extract_param(exc_core, 'KA', 200.0)
+            Efd_eq = x0[i, 8]  # Equilibrium field voltage
+            Vref_correct = V_mag[i] + Efd_eq / KA
+
             for key in exc_core.subs.keys():
                 if 'Vref' in str(key):
-                    exc_core.subs[key] = V_mag[i]
+                    exc_core.subs[key] = Vref_correct
                     break
-        
+
         return x0.flatten()
 
     def run_scan(self, bus_idx, f_max=20.0, amplitude=0.01, duration=60.0):
-        """Run Scan with White Noise Injection"""
+        """Run Scan with White Noise Injection
+
+        KEY FIX: We run TWO simulations:
+        1. BASELINE: No injection (to capture natural system response)
+        2. INJECTION: With white noise injection
+
+        The difference captures the DYNAMIC response to injection, including
+        how generator flux states (psi_f, psi_kd, psi_kq) evolve differently.
+        """
         print(f"Starting System ID on Bus {bus_idx}...")
         self.f_end = f_max
-        
+
         # Auto-adjust sampling
         required_fs = 10.0 * f_max
         if required_fs > self.fs:
             print(f"  Adjusting sampling rate from {self.fs} Hz to {required_fs} Hz")
             self.fs = required_fs
-        
+
         print(f"  Generating {duration}s White Noise (0-{f_max} Hz)...")
         self._inj_time, self._inj_signal_d, self._inj_signal_q = \
             self.generate_noise_signal(duration, f_max, amplitude)
-        
+
         x_start = self._initialize_equilibrium()
-        
-        print(f"  Simulating response (target bus: {bus_idx})...")
+
+        # ========================================================
+        # STEP 1: BASELINE SIMULATION (no injection)
+        # ========================================================
+        print(f"\n  [1/2] Running BASELINE simulation (no injection)...")
         print(f"    Total points: {len(self._inj_time):,}")
-        
-        # Progress tracking with visual bar
+
         last_print = [0]
         start_time = [__import__('time').time()]
-        
-        def progress_callback(t, x):
+
+        def progress_callback_baseline(t, x):
             current_time = __import__('time').time()
-            if current_time - last_print[0] > 1.0:  # Update every 1 second
+            if current_time - last_print[0] > 1.0:
                 progress_pct = 100 * t / duration
                 elapsed = current_time - start_time[0]
                 eta = (elapsed / t * duration - elapsed) if t > 0 else 0
-                
-                # Create visual progress bar
                 bar_length = 40
                 filled = int(bar_length * t / duration)
-                bar = '█' * filled + '░' * (bar_length - filled)
-                
-                # Print on same line using carriage return
+                bar = '#' * filled + '-' * (bar_length - filled)
                 print(f'\r    [{bar}] {progress_pct:5.1f}% | {t:6.1f}/{duration:.0f}s | ETA: {eta/60:4.1f} min', end='', flush=True)
                 last_print[0] = current_time
             return 1
-        progress_callback.terminal = False
-        
+        progress_callback_baseline.terminal = False
+
+        # Run baseline (target_bus=-1 means no injection)
+        sol_baseline = solve_ivp(
+            lambda t, x: self._dynamics_with_injection(t, x, -1),  # -1 = no injection
+            (0, duration), x_start, t_eval=self._inj_time, method='RK45',
+            max_step=1.0/self.fs, events=progress_callback_baseline
+        )
+
+        bar = '#' * 40
+        elapsed_baseline = __import__('time').time() - start_time[0]
+        print(f'\r    [{bar}] 100.0% | {duration:6.1f}/{duration:.0f}s | Done: {elapsed_baseline/60:4.1f} min')
+
+        # ========================================================
+        # STEP 2: INJECTION SIMULATION
+        # ========================================================
+        print(f"\n  [2/2] Running INJECTION simulation (target bus: {bus_idx})...")
+
+        last_print[0] = 0
+        start_time[0] = __import__('time').time()
+
+        def progress_callback_injection(t, x):
+            current_time = __import__('time').time()
+            if current_time - last_print[0] > 1.0:
+                progress_pct = 100 * t / duration
+                elapsed = current_time - start_time[0]
+                eta = (elapsed / t * duration - elapsed) if t > 0 else 0
+                bar_length = 40
+                filled = int(bar_length * t / duration)
+                bar = '#' * filled + '-' * (bar_length - filled)
+                print(f'\r    [{bar}] {progress_pct:5.1f}% | {t:6.1f}/{duration:.0f}s | ETA: {eta/60:4.1f} min', end='', flush=True)
+                last_print[0] = current_time
+            return 1
+        progress_callback_injection.terminal = False
+
         sol = solve_ivp(
             lambda t, x: self._dynamics_with_injection(t, x, bus_idx),
             (0, duration), x_start, t_eval=self._inj_time, method='RK45',
-            max_step=1.0/self.fs, events=progress_callback
+            max_step=1.0/self.fs, events=progress_callback_injection
         )
-        
-        # Final progress bar update (show 100%)
-        bar_length = 40
-        bar = '█' * bar_length
-        elapsed_total = __import__('time').time() - start_time[0]
-        print(f'\r    [{bar}] 100.0% | {duration:6.1f}/{duration:.0f}s | Total: {elapsed_total/60:4.1f} min')
-        print('    ✓ Simulation complete!')
-        
-        # Extract comprehensive signals
+
+        bar = '#' * 40
+        elapsed_injection = __import__('time').time() - start_time[0]
+        print(f'\r    [{bar}] 100.0% | {duration:6.1f}/{duration:.0f}s | Done: {elapsed_injection/60:4.1f} min')
+        print('    [OK] Both simulations complete!')
+
+        # Store baseline for TFE processing
+        self._sol_baseline = sol_baseline
+
+        # Extract comprehensive signals (from injection simulation)
         self._extract_detailed_signals(sol, bus_idx)
-        
+
         return sol, bus_idx
     
     def _extract_detailed_signals(self, sol, bus_idx):
@@ -493,50 +677,72 @@ class ImpedanceScannerTD:
     def post_process_tfe(self, sol, bus_idx):
         """Calculate DQ-frame Impedance using TFE (Welch)
 
-        We measure Z_dq = V_dq / I_dq where both are in the machine's dq frame.
-        This matches the approach used by impedance_scanner.py and imtb_scanner.py.
+        We measure Z_dq = deltaV_dq / I_dq where both are in the machine's dq frame.
 
-        The injection current (I_d + j*I_q) is in dq frame, transformed to RI frame
-        for network solution, then voltage is measured back in dq frame.
+        KEY FIX: We compute voltage PERTURBATION by comparing TWO TRAJECTORIES:
+        - sol: Full simulation WITH injection (states evolved with injection)
+        - sol_baseline: Full simulation WITHOUT injection (states evolved naturally)
+        - deltaV = V(sol, t) - V(sol_baseline, t)
+
+        This captures the DYNAMIC frequency-dependent response, including how
+        generator flux linkages (psi_f, psi_kd, psi_kq) evolved differently
+        due to the injection current.
         """
         print("  Processing Transfer Function Estimate (DQ Frame)...")
+        print("    Using TRAJECTORY DIFFERENCE method (captures dynamic response)")
         t = sol.t
 
-        V_dq_complex = np.zeros(len(t), dtype=complex)
+        # Check if baseline simulation exists
+        if not hasattr(self, '_sol_baseline') or self._sol_baseline is None:
+            print("  ! WARNING: No baseline simulation available!")
+            print("    Falling back to algebraic difference (will only capture Xd'')")
+            return self._post_process_tfe_algebraic(sol, bus_idx)
+
+        sol_base = self._sol_baseline
+
+        deltaV_dq = np.zeros(len(t), dtype=complex)  # Voltage PERTURBATION
         I_inj_dq = np.zeros(len(t), dtype=complex)
 
         for k in range(len(t)):
             I_inj = self._get_injection_current_interp(t[k])
             I_inj_dq[k] = I_inj  # Injection in DQ frame
 
-            x_k = sol.y[:, k].reshape(self.n_gen, self.states_per_machine)
-            gen_states = x_k[:, :7]
+            # --- INJECTION SIMULATION: Voltage with evolved states ---
+            x_inj = sol.y[:, k].reshape(self.n_gen, self.states_per_machine)
+            gen_states_inj = x_inj[:, :7]
+            Vd_inj, Vq_inj, _, _, _ = self._solve_network_with_injection(gen_states_inj, bus_idx, I_inj)
 
-            # Injection is transformed to RI inside _solve_network_with_injection
-            # Output Vd, Vq are in DQ frame (matching injection frame)
-            Vd, Vq, Id_gen, Iq_gen, V_term = self._solve_network_with_injection(gen_states, bus_idx, I_inj)
-            V_dq_complex[k] = Vd[bus_idx] + 1j * Vq[bus_idx]  # DQ frame voltage
+            # --- BASELINE SIMULATION: Voltage with baseline states ---
+            x_base = sol_base.y[:, k].reshape(self.n_gen, self.states_per_machine)
+            gen_states_base = x_base[:, :7]
+            Vd_base, Vq_base, _, _, _ = self._solve_network_with_injection(gen_states_base, -1, 0j)
+
+            # Voltage PERTURBATION = difference between trajectories
+            deltaVd = Vd_inj[bus_idx] - Vd_base[bus_idx]
+            deltaVq = Vq_inj[bus_idx] - Vq_base[bus_idx]
+            deltaV_dq[k] = deltaVd + 1j * deltaVq
 
         # Diagnostics
-        v_rms = np.std(V_dq_complex)
+        dv_rms = np.std(deltaV_dq)
         i_inj_rms = np.std(I_inj_dq)
-        v_mean = np.mean(np.abs(V_dq_complex))
-        print(f"  > Signal Statistics (DQ Frame):")
-        print(f"      V_dq_rms={v_rms:.6f} pu, V_dq_mean={v_mean:.6f} pu")
-        print(f"      I_inj_rms={i_inj_rms:.6f} pu (injection current in dq)")
-        print(f"      Quick Z_dq estimate: V/I={v_rms/i_inj_rms:.6f} pu")
+        print(f"  > Signal Statistics (DQ Frame - Trajectory Difference):")
+        print(f"      deltaV_dq_rms={dv_rms:.6f} pu (dynamic voltage perturbation)")
+        print(f"      I_inj_rms={i_inj_rms:.6f} pu (injection current)")
+        if i_inj_rms > 1e-9:
+            print(f"      Quick Z estimate: deltaV/I = {dv_rms/i_inj_rms:.4f} pu")
 
         if i_inj_rms < 1e-9:
             print("  ! WARNING: Injection current is effectively zero.")
 
-        if v_rms < 1e-4:
-            print(f"  ! WARNING: Voltage response is very small ({v_rms:.6f} pu)!")
+        if dv_rms < 1e-6:
+            print(f"  ! WARNING: Voltage perturbation is very small ({dv_rms:.6f} pu)!")
+            print(f"    Consider increasing injection amplitude.")
 
-        # Detrend signals (remove DC component)
-        V_ac = signal.detrend(V_dq_complex, type='constant')
+        # Detrend signals (remove any residual DC)
+        V_ac = signal.detrend(deltaV_dq, type='constant')
         I_ac = signal.detrend(I_inj_dq, type='constant')
 
-        # Calculate Spectra
+        # Calculate Spectra using Welch method
         n_seg = min(4096, len(t))
         f, P_iv = signal.csd(I_ac, V_ac, fs=self.fs, nperseg=n_seg, return_onesided=False)
         f, P_ii = signal.welch(I_ac, fs=self.fs, nperseg=n_seg, return_onesided=False)
@@ -554,20 +760,66 @@ class ImpedanceScannerTD:
         P_ii = P_ii_shift[pos_mask]
         P_vv = P_vv_shift[pos_mask]
 
-        # Impedance Z = V/I
+        # Impedance Z = V/I (cross-spectral density method)
         P_ii[np.abs(P_ii) < 1e-15] = 1e-15
         Z_est = P_iv / P_ii
 
-        # Coherence
+        # Coherence (quality metric)
         P_vv[np.abs(P_vv) < 1e-15] = 1e-15
         Coherence = (np.abs(P_iv)**2) / (P_ii * P_vv)
 
         avg_coh = np.mean(Coherence)
         print(f"  > Average Coherence: {avg_coh:.4f}")
 
+        if avg_coh < 0.5:
+            print("    ! Low coherence indicates noisy measurement or nonlinear effects")
+
         # Filter by frequency range
         valid_mask = (freqs < self.f_end)
 
+        return freqs[valid_mask], Z_est[valid_mask]
+
+    def _post_process_tfe_algebraic(self, sol, bus_idx):
+        """Fallback method: algebraic impedance (only captures Xd'')."""
+        t = sol.t
+
+        deltaV_dq = np.zeros(len(t), dtype=complex)
+        I_inj_dq = np.zeros(len(t), dtype=complex)
+
+        for k in range(len(t)):
+            I_inj = self._get_injection_current_interp(t[k])
+            I_inj_dq[k] = I_inj
+
+            x_k = sol.y[:, k].reshape(self.n_gen, self.states_per_machine)
+            gen_states = x_k[:, :7]
+
+            Vd_inj, Vq_inj, _, _, _ = self._solve_network_with_injection(gen_states, bus_idx, I_inj)
+            Vd_base, Vq_base, _, _, _ = self._solve_network_with_injection(gen_states, -1, 0j)
+
+            deltaVd = Vd_inj[bus_idx] - Vd_base[bus_idx]
+            deltaVq = Vq_inj[bus_idx] - Vq_base[bus_idx]
+            deltaV_dq[k] = deltaVd + 1j * deltaVq
+
+        V_ac = signal.detrend(deltaV_dq, type='constant')
+        I_ac = signal.detrend(I_inj_dq, type='constant')
+
+        n_seg = min(4096, len(t))
+        f, P_iv = signal.csd(I_ac, V_ac, fs=self.fs, nperseg=n_seg, return_onesided=False)
+        f, P_ii = signal.welch(I_ac, fs=self.fs, nperseg=n_seg, return_onesided=False)
+
+        f_shift = np.fft.fftshift(f)
+        P_iv_shift = np.fft.fftshift(P_iv)
+        P_ii_shift = np.fft.fftshift(P_ii)
+
+        pos_mask = f_shift > 0
+        freqs = f_shift[pos_mask]
+        P_iv = P_iv_shift[pos_mask]
+        P_ii = P_ii_shift[pos_mask]
+
+        P_ii[np.abs(P_ii) < 1e-15] = 1e-15
+        Z_est = P_iv / P_ii
+
+        valid_mask = (freqs < self.f_end)
         return freqs[valid_mask], Z_est[valid_mask]
 
     def compute_network_impedance(self, bus_idx, freqs):
@@ -583,25 +835,29 @@ class ImpedanceScannerTD:
         print(f"  Computing Network Impedance (excluding Gen {bus_idx+1})...")
 
         # Build Y_total but exclude the target generator's admittance
-        Ybus = self.coordinator.Ybus_base.copy()
-        Xd2 = 0.25 * (100.0 / 900.0)  # Xd'' on system base
-        y_gen = 1.0 / (1j * Xd2)
+        Y_network = self.coordinator.Ybus_base.copy()
 
-        # Add all generators EXCEPT the target bus
-        Y_network = Ybus.copy()
+        # Add all generators EXCEPT the target bus (using metadata values)
         for i in range(self.n_gen):
             if i != bus_idx:
-                Y_network[i, i] += y_gen
+                meta = self.builder.gen_metadata[i]
+                Xd2_sys = meta.get('xd2', 0.0278)  # Already on system base
+                y_gen = 1.0 / (1j * Xd2_sys)
+                gen_bus = self.coordinator.gen_bus_internal[i]
+                Y_network[gen_bus, gen_bus] += y_gen
+
+        # Get internal bus index for target
+        gen_bus_target = self.coordinator.gen_bus_internal[bus_idx]
 
         # Network impedance at target bus (self-impedance from Z = inv(Y))
         Z_network_matrix = np.linalg.inv(Y_network)
-        Z_network_self = Z_network_matrix[bus_idx, bus_idx]
+        Z_network_self = Z_network_matrix[gen_bus_target, gen_bus_target]
 
         # Network impedance is frequency-independent (purely algebraic)
         # Return same value for all frequencies
         Z_network = np.full(len(freqs), Z_network_self, dtype=complex)
 
-        print(f"      Z_network = {np.abs(Z_network_self):.4f} pu @ {np.degrees(np.angle(Z_network_self)):.1f}°")
+        print(f"      Z_network = {np.abs(Z_network_self):.4f} pu @ {np.degrees(np.angle(Z_network_self)):.1f} deg")
 
         return Z_network
 
@@ -614,44 +870,42 @@ class ImpedanceScannerTD:
         Zd(s) = Ra + Xd''*s * (1 + s*Td'') * (1 + s*Td') / ((1 + s*Td0') * (1 + s*Td0''))
 
         At different frequencies:
-        - f → 0: Z → Ra (stator resistance)
-        - f = 60 Hz: Z ≈ j*Xd'' (subtransient reactance)
-        - f → ∞: Z → Ra + j*ω*Ll (leakage)
+        - f -> 0: Z -> Ra (stator resistance)
+        - f = 60 Hz: Z ~ j*Xd'' (subtransient reactance)
+        - f -> inf: Z -> Ra + j*w*Ll (leakage)
 
-        Note: Values are on SYSTEM BASE (100 MVA), not machine base.
+        Note: Values in metadata are ALREADY on system base (100 MVA).
         """
         print(f"  Computing Generator Impedance for Gen {bus_idx+1}...")
 
         meta = self.builder.gen_metadata[bus_idx]
+        gen_core = self.builder.generators[bus_idx]
 
-        # Machine parameters (on machine base 900 MVA)
-        Ra_m = meta['ra']       # Stator resistance
-        Xd_m = meta.get('xd', 1.8)    # Synchronous reactance
-        Xd1_m = meta['xd1']     # Transient reactance (Xd')
-        Xd2_m = meta.get('xd2', 0.25)  # Subtransient reactance (Xd'')
-        Xl_m = meta['xl']       # Leakage reactance
+        # Machine parameters (ALREADY on system base in metadata)
+        Ra = meta['ra']
+        Xd = meta.get('xd', 0.2)
+        Xd1 = meta['xd1']
+        Xd2 = meta.get('xd2', 0.0278)
+        Xl = meta['xl']
 
-        # Time constants
-        Td10 = 8.0   # d-axis transient open-circuit time constant
-        Td20 = 0.03  # d-axis subtransient open-circuit time constant
+        # Time constants from component
+        Td10 = self._extract_param(gen_core, 'Td10', 8.0)
+        Td20 = self._extract_param(gen_core, 'Td20', 0.03)
 
         # Derived time constants (short-circuit)
-        Td1 = Td10 * Xd1_m / Xd_m    # Td'
-        Td2 = Td20 * Xd2_m / Xd1_m   # Td''
-
-        # Convert to system base (100 MVA)
-        base_ratio = 100.0 / 900.0
-        Ra = Ra_m * base_ratio
-        Xd = Xd_m * base_ratio
-        Xd1 = Xd1_m * base_ratio
-        Xd2 = Xd2_m * base_ratio
-        Xl = Xl_m * base_ratio
+        if Xd > 1e-6:
+            Td1 = Td10 * Xd1 / Xd
+        else:
+            Td1 = Td10
+        if Xd1 > 1e-6:
+            Td2 = Td20 * Xd2 / Xd1
+        else:
+            Td2 = Td20
 
         print(f"      Ra={Ra:.4f}, Xd={Xd:.4f}, Xd'={Xd1:.4f}, Xd''={Xd2:.4f} pu (system base)")
         print(f"      Td0'={Td10:.2f}s, Td0''={Td20:.3f}s, Td'={Td1:.4f}s, Td''={Td2:.6f}s")
 
         # Compute frequency-dependent impedance
-        omega_b = 2 * np.pi * 60.0  # Base angular frequency (rad/s)
         Z_gen = np.zeros(len(freqs), dtype=complex)
 
         for i, f in enumerate(freqs):
