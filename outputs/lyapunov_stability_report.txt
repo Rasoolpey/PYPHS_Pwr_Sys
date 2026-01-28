@@ -1,0 +1,21 @@
+======================================================================
+   LYAPUNOV STABILITY ANALYSIS REPORT
+======================================================================
+
+System Configuration:
+  Generators: 4
+  Total states: 52
+  Equilibrium energy: H* = 2923040.795009
+
+Linearized Stability:
+  Status: STABLE
+  Stable modes: 36
+  Unstable modes: 0
+  Marginal modes: 16
+
+Dominant Eigenvalues:
+  1. λ = 0.000000 + 376.991118j
+  2. λ = 0.000000 + -376.991118j
+  3. λ = 0.000000 + 0.000000j
+  4. λ = 0.000000 + 0.000000j
+  5. λ = 0.000000 + 0.000000j

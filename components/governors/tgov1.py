@@ -1,22 +1,95 @@
 """TGOV1 Governor Model"""
 import sys
 sys.path.insert(0, '/home/claude')
-from utils.pyphs_core import Core
+from utils.pyphs_core import DynamicsCore
+import numpy as np
+
+
+def tgov1_dynamics(x, ports, meta):
+    """
+    Numerical dynamics for TGOV1 governor.
+
+    Args:
+        x: numpy array of 2 states [x1, x2]
+           x1: valve/gate position
+           x2: turbine state
+        ports: dict with keys {'omega', 'Pm_ref'}
+        meta: dict of governor parameters
+
+    Returns:
+        x_dot: numpy array of 2 state derivatives
+    """
+    # Extract states
+    x1, x2 = x
+
+    # Extract ports
+    omega = ports.get('omega', 1.0)
+    Pm_ref = ports.get('Pm_ref', None)
+
+    # Extract parameters
+    R = meta['R']
+    T1 = meta['T1']
+    T3 = meta['T3']
+    Pref = meta['Pref']
+    wref = meta['wref']
+    VMAX = meta['VMAX']
+    VMIN = meta['VMIN']
+
+    # Use Pm_ref from port if provided, otherwise use Pref from metadata
+    if Pm_ref is None:
+        Pm_ref = Pref
+
+    # Gate command with droop
+    gate_cmd = Pm_ref + (wref - omega) / R
+
+    # Apply limits
+    gate_limited = np.clip(gate_cmd, VMIN, VMAX)
+
+    # State derivatives
+    x_dot = np.zeros(2)
+
+    # Governor dynamics
+    x_dot[0] = 10.0 * (gate_limited - x1) / T1  # d(x1)/dt - valve dynamics
+    x_dot[1] = 10.0 * (x1 - x2) / T3  # d(x2)/dt - turbine dynamics
+
+    return x_dot
+
+
+def tgov1_output(x, ports, meta):
+    """
+    Compute mechanical torque output.
+
+    Args:
+        x: numpy array of 2 states [x1, x2]
+        ports: dict with keys {'omega'}
+        meta: dict of governor parameters
+
+    Returns:
+        Tm: mechanical torque
+    """
+    x1, x2 = x
+    omega = ports.get('omega', 1.0)
+    T2 = meta['T2']
+    T3 = meta['T3']
+    Dt = meta['Dt']
+
+    Tm = (T2 / T3) * (x1 - x2) + x2 - Dt * (omega - 1.0)
+    return Tm
 
 
 def build_tgov1_core(gov_data, S_machine=900.0, S_system=100.0):
-    """Build TGOV1 governor as PyPHS Core
-    
+    """Build TGOV1 governor as DynamicsCore
+
     Args:
         gov_data: dict with governor parameters
         S_machine: machine base power (MVA)
         S_system: system base power (MVA)
-    
+
     Returns:
-        core: PyPHS Core object
+        core: DynamicsCore object with dynamics method
         metadata: dict with additional info
     """
-    core = Core(label=f'TGOV1_{gov_data["idx"]}')
+    core = DynamicsCore(label=f'TGOV1_{gov_data["idx"]}', dynamics_fn=tgov1_dynamics)
     
     # Extract and scale parameters
     R_machine = max(gov_data['R'], 0.001)
@@ -82,5 +155,8 @@ def build_tgov1_core(gov_data, S_machine=900.0, S_system=100.0):
         'wref': wref,
         'Pref': Pref
     }
-    
+
+    # Set metadata on core for dynamics computation
+    core.set_metadata(metadata)
+
     return core, metadata

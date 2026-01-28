@@ -1,22 +1,79 @@
 """GENROU Generator Model"""
 import sys
 sys.path.insert(0, '/home/claude')
-from utils.pyphs_core import Core
+from utils.pyphs_core import DynamicsCore
 import numpy as np
 
 
+def genrou_dynamics(x, ports, meta):
+    """
+    Numerical dynamics for GENROU generator.
+
+    Args:
+        x: numpy array of 7 states [delta, p, psi_d, psi_q, psi_f, psi_kd, psi_kq]
+        ports: dict with keys {'Id', 'Iq', 'Vd', 'Vq', 'Tm', 'Efd'}
+        meta: dict of generator parameters
+
+    Returns:
+        x_dot: numpy array of 7 state derivatives
+    """
+    # Extract states
+    delta, p, psi_d, psi_q, psi_f, psi_kd, psi_kq = x
+
+    # Extract ports
+    Id = ports.get('Id', 0.0)
+    Iq = ports.get('Iq', 0.0)
+    Vd = ports.get('Vd', 0.0)
+    Vq = ports.get('Vq', 0.0)
+    Tm = ports.get('Tm', 0.0)
+    Efd = ports.get('Efd', 1.0)
+
+    # Extract parameters
+    M = meta['M']
+    D = meta['D']
+    ra = meta['ra']
+    omega_b = meta['omega_b']
+    Td10 = meta['Td10']
+    Td20 = meta['Td20']
+    Tq20 = meta['Tq20']
+
+    # Rotor speed from momentum
+    omega = p / M
+
+    # Electrical torque
+    Te = Vd * Id + Vq * Iq
+
+    # State derivatives
+    x_dot = np.zeros(7)
+
+    # Swing equations
+    x_dot[0] = omega_b * (omega - 1.0)  # d(delta)/dt
+    x_dot[1] = Tm - Te - D * (omega - 1.0)  # d(p)/dt = M * d(omega)/dt
+
+    # Stator flux linkage equations
+    x_dot[2] = Vd - ra * Id + omega_b * omega * psi_q  # d(psi_d)/dt
+    x_dot[3] = Vq - ra * Iq - omega_b * omega * psi_d  # d(psi_q)/dt
+
+    # Rotor flux dynamics
+    x_dot[4] = (Efd - psi_f) / Td10  # d(psi_f)/dt - field winding
+    x_dot[5] = -psi_kd / Td20  # d(psi_kd)/dt - d-axis damper
+    x_dot[6] = -psi_kq / Tq20  # d(psi_kq)/dt - q-axis damper
+
+    return x_dot
+
+
 def build_genrou_core(gen_data, S_system=100.0):
-    """Build GENROU generator as PyPHS Core
-    
+    """Build GENROU generator as DynamicsCore
+
     Args:
         gen_data: dict with generator parameters
         S_system: system base power (MVA)
-    
+
     Returns:
-        core: PyPHS Core object
+        core: DynamicsCore object with dynamics method
         metadata: dict with additional info
     """
-    core = Core(label=f'GENROU_{gen_data["idx"]}')
+    core = DynamicsCore(label=f'GENROU_{gen_data["idx"]}', dynamics_fn=genrou_dynamics)
     
     # Extract and scale parameters
     Sn = gen_data.get('Sn', 900.0)
@@ -139,7 +196,14 @@ def build_genrou_core(gen_data, S_system=100.0):
         'gq1': gq1, 'gq2': gq2,
         'ra': ra_val,
         'M': M_val,
-        'D': D_val
+        'D': D_val,
+        'Td10': Td10,
+        'Td20': Td20,
+        'Tq10': Tq10,
+        'Tq20': Tq20
     }
-    
+
+    # Set metadata on core for dynamics computation
+    core.set_metadata(metadata)
+
     return core, metadata

@@ -1,5 +1,6 @@
 """Standalone PyPHS-compatible Core class"""
 import sympy as sp
+import numpy as np
 
 
 class Core:
@@ -79,3 +80,54 @@ class Core:
         combined.H = self.H + other.H
         combined.subs = {**self.subs, **other.subs}
         return combined
+
+
+class DynamicsCore(Core):
+    """
+    Core with numerical dynamics capability.
+
+    Each component provides its own dynamics function that computes
+    state derivatives given current states and port values.
+    """
+
+    def __init__(self, label='system', dynamics_fn=None):
+        """
+        Args:
+            label: Component label
+            dynamics_fn: Function with signature (x, ports, metadata) -> x_dot
+                        where x is state vector, ports is dict of port values,
+                        metadata is dict of parameters
+        """
+        super().__init__(label)
+        self._dynamics_fn = dynamics_fn
+        self._metadata = {}
+
+    def set_dynamics(self, dynamics_fn):
+        """Set the dynamics function after construction"""
+        self._dynamics_fn = dynamics_fn
+
+    def set_metadata(self, metadata):
+        """Set metadata for dynamics computation"""
+        self._metadata = metadata
+
+    def dynamics(self, x, ports):
+        """
+        Compute state derivatives.
+
+        Args:
+            x: numpy array of state values
+            ports: dict of port values (e.g., {'Vd': 0.5, 'Vq': 0.8, 'Id': 1.0, 'Iq': 0.5})
+
+        Returns:
+            x_dot: numpy array of state derivatives
+        """
+        if self._dynamics_fn is None:
+            raise NotImplementedError(
+                f"Dynamics function not implemented for {self.label}. "
+                "Provide dynamics_fn in constructor or call set_dynamics()."
+            )
+        return self._dynamics_fn(x, ports, self._metadata)
+
+    def n_states(self):
+        """Return number of states"""
+        return len(self.x)

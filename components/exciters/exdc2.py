@@ -1,20 +1,78 @@
 """EXDC2 Exciter Model"""
 import sys
 sys.path.insert(0, '/home/claude')
-from utils.pyphs_core import Core
+from utils.pyphs_core import DynamicsCore
+import numpy as np
+
+
+def exdc2_dynamics(x, ports, meta):
+    """
+    Numerical dynamics for EXDC2 exciter.
+
+    Args:
+        x: numpy array of 4 states [vm, vr1, vr2, vf]
+           vm: voltage measurement
+           vr1: regulator output (Efd)
+           vr2: lead-lag state
+           vf: feedback state
+        ports: dict with keys {'Vt'}
+        meta: dict of exciter parameters
+
+    Returns:
+        x_dot: numpy array of 4 state derivatives
+    """
+    # Extract states
+    vm, vr1, vr2, vf = x
+
+    # Extract ports
+    Vt = ports.get('Vt', 1.0)
+
+    # Extract parameters
+    TR = meta['TR']
+    TA = meta['TA']
+    KA = meta['KA']
+    Vref = meta['Vref']
+    VRMAX = meta['VRMAX']
+    VRMIN = meta['VRMIN']
+
+    # State derivatives
+    x_dot = np.zeros(4)
+
+    # Voltage measurement dynamics
+    x_dot[0] = (Vt - vm) / TR  # d(vm)/dt
+
+    # Voltage error
+    Verr = Vref - vm
+
+    # Regulator dynamics with anti-windup
+    vr1_unlimited = (KA * Verr - vr1) / TA
+
+    # Anti-windup limiter
+    if vr1 >= VRMAX and vr1_unlimited > 0:
+        x_dot[1] = 0.0
+    elif vr1 <= VRMIN and vr1_unlimited < 0:
+        x_dot[1] = 0.0
+    else:
+        x_dot[1] = vr1_unlimited
+
+    # vr2, vf not used in simplified model
+    x_dot[2] = 0.0
+    x_dot[3] = 0.0
+
+    return x_dot
 
 
 def build_exdc2_core(exc_data):
-    """Build EXDC2 exciter as PyPHS Core
-    
+    """Build EXDC2 exciter as DynamicsCore
+
     Args:
         exc_data: dict with exciter parameters
-    
+
     Returns:
-        core: PyPHS Core object
+        core: DynamicsCore object with dynamics method
         metadata: dict with additional info
     """
-    core = Core(label=f'EXDC2_{exc_data["idx"]}')
+    core = DynamicsCore(label=f'EXDC2_{exc_data["idx"]}', dynamics_fn=exdc2_dynamics)
     
     # Extract parameters
     TR = exc_data['TR']
@@ -90,6 +148,10 @@ def build_exdc2_core(exc_data):
         'SE1': exc_data['SE1'],
         'E2': exc_data['E2'],
         'SE2': exc_data['SE2'],
+        'TR': TR,
+        'TA': TA,
+        'TE': TE,
+        'TF1': TF1,
         'KA': KA,
         'KE': KE,
         'KF': KF,
@@ -97,5 +159,8 @@ def build_exdc2_core(exc_data):
         'TB': TB,
         'Vref': Vref
     }
-    
+
+    # Set metadata on core for dynamics computation
+    core.set_metadata(metadata)
+
     return core, metadata
