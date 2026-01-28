@@ -353,6 +353,7 @@ The framework uses a clean separation of concerns with each module handling spec
 **impedance_scanner_td.py** ⭐ - Time-Domain White Noise Scanner
 - Band-limited white noise current injection
 - Transfer function estimation via Welch's method
+- **Trajectory difference method**: Runs baseline + injection simulations to capture dynamic impedance
 - Captures full nonlinear dynamics and saturation
 - Visual progress bar with real-time updates
 - Comprehensive signal extraction (Vd, Vq, Id, Iq, δ, ω, Efd, Gate, Pm, Pe)
@@ -399,9 +400,9 @@ The framework provides **three complementary impedance scanning methods**, each 
 |---------|-----------------|----------------|------------------------|
 | **File** | `impedance_scanner.py` | `imtb_scanner.py` | `impedance_scanner_td.py` |
 | **Test Script** | `test_impedance_scanning.py` | `test_imtb_scanning.py` | `test_impedance_td.py` |
-| **Technique** | Linearization | Multisine DFT | Welch's PSD Estimation |
-| **Computation** | State-space analysis | Time simulation | Time simulation |
-| **Speed** | Very Fast (~seconds) | Medium (~minutes) | Slow (~minutes) |
+| **Technique** | Linearization | Multisine DFT | Trajectory Difference + Welch |
+| **Computation** | State-space analysis | Time simulation | Two simulations (baseline + injection) |
+| **Speed** | Very Fast (~seconds) | Medium (~minutes) | Slow (~5-15 minutes) |
 | **Frequency Points** | 100+ points | 20-50 points | Resolution = duration⁻¹ |
 | **Amplitude** | Infinitesimal (ε=10⁻⁵) | 0.01-0.10 pu | 0.001-0.10 pu |
 | **Nonlinearity** | ❌ Linear only | ✓ Partial (saturation) | ✓ Full nonlinear |
@@ -470,21 +471,28 @@ freqs = np.logspace(-1, 2, 30)  # 30 frequencies from 0.1-100 Hz
 
 ### Method 3: Time-Domain White Noise Scanner
 
-**Principle:** Injects band-limited white noise and uses spectral analysis (Welch's method) to estimate the transfer function from current to voltage.
+**Principle:** Injects band-limited white noise and uses spectral analysis (Welch's method) to estimate the transfer function from current to voltage. Uses **trajectory difference method** to capture dynamic frequency-dependent impedance.
 
 **Mathematical Approach:**
-1. Inject band-limited white noise: I(t) ~ N(0, σ²), filtered to [0, f_max]
-2. Measure voltage response V(t)
-3. Compute PSDs: Z(f) = Pᵥᵢ(f) / Pᵢᵢ(f)
+1. Run **baseline simulation** (no injection) to capture natural system evolution
+2. Run **injection simulation** with band-limited white noise: I(t) ~ N(0, σ²), filtered to [0, f_max]
+3. Compute voltage perturbation: ΔV(t) = V_injection(t) - V_baseline(t)
+4. Apply Welch's method: Z(f) = P_ΔV,I(f) / P_II(f)
+
+**Why Trajectory Difference?**
+- Single-simulation approach only captures **algebraic impedance** (Xd'')
+- Trajectory difference captures how **generator flux dynamics** (ψf, ψkd, ψkq) evolve differently due to injection
+- Result: Frequency-dependent impedance showing subtransient/transient behavior
 
 **Key Features:**
+- ✓ **Trajectory difference method** for dynamic impedance measurement
 - ✓ Captures full nonlinear dynamics and saturation
 - ✓ Most realistic method (simulates actual disturbances)
 - ✓ Amplitude-dependent impedance (reveals nonlinearity)
 - ✓ Visual progress bar with real-time ETA
 - ✓ Comprehensive signal extraction (13 signal types)
 - ✓ 8-panel system response visualization
-- ⚠ Computationally expensive (60s simulation takes ~2-5 minutes)
+- ⚠ Computationally expensive (runs two simulations, ~5-15 minutes total)
 - ⚠ Noisy results (requires long duration for averaging)
 - ⚠ Single complex impedance (not MIMO)
 
@@ -510,12 +518,15 @@ amplitude = 0.01      # Injection amplitude (pu) - test different levels
 - **Duration ↑** → Better frequency resolution, better averaging, longer computation
 - **f_max ↑** → Higher frequencies captured, faster sampling needed, slower computation
 - **Amplitude ↑** → Reveals nonlinearity, may cause instability
+- **Two simulations** → Captures dynamic impedance but doubles computation time
 
 **Advanced Features:**
-- **Progress Tracking:** Real-time progress bar showing elapsed/total time and ETA
+- **Trajectory Difference:** Runs baseline + injection simulations for true dynamic impedance
+- **Progress Tracking:** Real-time progress bar showing elapsed/total time and ETA (for each simulation)
 - **Signal Extraction:** Captures Vd, Vq, Id, Iq, δ, ω, Efd, Gate, Pm, Pe, Vref
 - **Response Plotting:** 8-panel visualization of system dynamics
 - **Saturation Diagnostics:** Can identify when/where controllers saturate
+- **Coherence Metric:** Quality indicator for TFE estimation (should be >0.5)
 
 **Example Output:** 
 - Impedance spectrum from 0.1 Hz to f_max
@@ -567,6 +578,8 @@ amplitude = 0.01      # Injection amplitude (pu) - test different levels
 - Corrected diagnostic array reshaping (sol.y vs sol.y.T)
 - **Proper D-matrix computation in frequency-domain method** (captures network impedance)
 - **Iterative power flow trim for all methods** (consistent equilibrium initialization)
+- **Correct Vref initialization** (Vref = Vt + Efd/KA for equilibrium) - **all methods**
+- **Trajectory difference method in time-domain scanner** (captures dynamic impedance)
 
 **Signal Monitoring (Time-Domain Only):**
 ```python
@@ -960,11 +973,24 @@ To contribute new models or analysis tools:
 
 ---
 
-**Framework Version**: 1.1
+**Framework Version**: 1.2
 **Author**: [Your Name]
 **Last Updated**: January 2026
 
 ### Changelog
+
+**v1.2 (January 2026)**
+- **Time-Domain Impedance Scanner Major Fix:**
+  - Implemented **trajectory difference method** for proper dynamic impedance measurement
+  - Runs baseline simulation (no injection) + injection simulation
+  - Voltage perturbation ΔV = V_injection - V_baseline captures dynamic response
+  - Fixed flat impedance issue (was only measuring algebraic Xd'')
+  - Measured impedance now shows frequency-dependent behavior matching analytical predictions
+- **Exciter Equilibrium Fix (all modules):**
+  - Fixed Vref initialization: Vref = Vt + Efd/KA (maintains equilibrium)
+  - Prevents Efd drift and system instability during long simulations
+- **ASCII Progress Bar:**
+  - Changed Unicode characters to ASCII (#, -) for Windows compatibility
 
 **v1.1 (January 2026)**
 - Fixed Ybus transformer scaling bug (removed incorrect turns ratio division)
