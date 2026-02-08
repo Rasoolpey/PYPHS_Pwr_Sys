@@ -162,6 +162,7 @@ def build_tgov1_core(gov_data, S_machine=900.0, S_system=100.0):
     # Set component interface attributes
     core.n_states = 2
     core.output_fn = tgov1_output
+    core.init_fn = lambda Pm_eq, **kwargs: np.array([Pm_eq, Pm_eq])
     core.component_type = "governor"
     core.model_name = "TGOV1"
 

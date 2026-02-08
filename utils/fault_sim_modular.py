@@ -56,26 +56,27 @@ class ModularFaultSimulator:
         else:
             self.n_gen_states = 7  # Fallback
         
-        # Get exciter state count dynamically from first exciter
-        if len(self.builder.exciters) > 0:
-            self.n_exc_states = self.builder.exciters[0].n_states
-        else:
-            self.n_exc_states = 4  # Fallback
+        # Track individual component state counts (support heterogeneous components)
+        self.gen_state_counts = [gen.n_states for gen in self.builder.generators]
+        self.exc_state_counts = [exc.n_states for exc in self.builder.exciters]
+        self.gov_state_counts = [gov.n_states for gov in self.builder.governors]
+        self.grid_state_counts = [grid.n_states for grid in self.builder.grids] if self.n_grid > 0 else []
         
-        # Get governor state count dynamically from first governor
-        if len(self.builder.governors) > 0:
-            self.n_gov_states = self.builder.governors[0].n_states
-        else:
-            self.n_gov_states = 2  # Fallback
+        # Build state index map for each machine
+        self.machine_state_offsets = []  # Start index for each machine in the flat state vector
+        offset = 0
+        for i in range(self.n_gen):
+            self.machine_state_offsets.append({
+                'gen_start': offset,
+                'exc_start': offset + self.gen_state_counts[i],
+                'gov_start': offset + self.gen_state_counts[i] + self.exc_state_counts[i],
+                'total': self.gen_state_counts[i] + self.exc_state_counts[i] + self.gov_state_counts[i]
+            })
+            offset += self.machine_state_offsets[i]['total']
         
-        # Get grid state count dynamically
-        if self.n_grid > 0:
-            self.n_grid_states = self.builder.grids[0].n_states
-        else:
-            self.n_grid_states = 0
-        
-        self.states_per_machine = self.n_gen_states + self.n_exc_states + self.n_gov_states
-        self.total_states = self.n_gen * self.states_per_machine + self.n_grid * self.n_grid_states
+        # Grid states come after all machine states
+        self.grid_state_offset = offset
+        self.total_states = offset + sum(self.grid_state_counts)
 
         # Base frequency
         self.omega_b = 2 * np.pi * 60
@@ -90,11 +91,13 @@ class ModularFaultSimulator:
         self._extract_initial_conditions()
 
         print(f"\nModular Fault Simulator: {self.n_gen} generators, {self.n_grid} grids, {self.total_states} states")
-        print(f"  Component states: Gen={self.n_gen_states}, Exc={self.n_exc_states}, Gov={self.n_gov_states}, Grid={self.n_grid_states}")
+        print(f"  Component states per machine: Gen={self.gen_state_counts}, Exc={self.exc_state_counts}, Gov={self.gov_state_counts}")
         if len(self.builder.exciters) > 0:
-            print(f"  Exciter type: {self.builder.exciters[0].model_name}")
+            exc_models = set(exc.model_name for exc in self.builder.exciters)
+            print(f"  Exciter models: {', '.join(exc_models)}")
         if len(self.builder.governors) > 0:
-            print(f"  Governor type: {self.builder.governors[0].model_name}")
+            gov_models = set(gov.model_name for gov in self.builder.governors)
+            print(f"  Governor models: {', '.join(gov_models)}")
     
     def _load_simulation_config(self, simulation_json):
         """Load simulation configuration from JSON file or use defaults"""
@@ -239,43 +242,55 @@ class ModularFaultSimulator:
             return False
 
     def dynamics(self, t, x_flat):
-        """System dynamics"""
-        # Split state vector into generator and grid parts
-        gen_size = self.n_gen * self.states_per_machine
-        x_gen_flat = x_flat[:gen_size]
-        x_grid_flat = x_flat[gen_size:]
+        """System dynamics - fully generic for heterogeneous component state counts"""
+        # Extract states for each machine using individual offsets
+        gen_states = []
+        exc_states = []
+        gov_states = []
         
-        x = x_gen_flat.reshape(self.n_gen, self.states_per_machine)
-        x_grid = x_grid_flat.reshape(self.n_grid, self.n_grid_states) if self.n_grid > 0 else np.array([])
-
-        # Dynamically extract states based on actual component sizes
-        gen_states = x[:, :self.n_gen_states]
-        exc_offset = self.n_gen_states
-        exc_states = x[:, exc_offset:exc_offset+self.n_exc_states]
-        gov_offset = exc_offset + self.n_exc_states
-        gov_states = x[:, gov_offset:gov_offset+self.n_gov_states]
+        for i in range(self.n_gen):
+            offsets = self.machine_state_offsets[i]
+            gen_start = offsets['gen_start']
+            exc_start = offsets['exc_start']
+            gov_start = offsets['gov_start']
+            machine_end = gen_start + offsets['total']
+            
+            gen_states.append(x_flat[gen_start:gen_start + self.gen_state_counts[i]])
+            exc_states.append(x_flat[exc_start:exc_start + self.exc_state_counts[i]])
+            gov_states.append(x_flat[gov_start:gov_start + self.gov_state_counts[i]])
+        
+        # Extract grid states (come after all machine states)
+        x_grid = []
+        if self.n_grid > 0:
+            for i in range(self.n_grid):
+                grid_start = self.grid_state_offset + sum(self.grid_state_counts[:i])
+                grid_end = grid_start + self.grid_state_counts[i]
+                x_grid.append(x_flat[grid_start:grid_end])
 
         # Determine if fault is active
         use_fault = self.fault_enabled and self.fault_start <= t < (self.fault_start + self.fault_duration)
 
-        # Extract grid voltages if grids exist
+        # Extract grid voltages if grids exist (generic for any grid state structure)
         grid_voltages = None
         if self.n_grid > 0:
             # Grid voltages are complex phasors: V = V_mag * exp(j*theta)
-            grid_voltages = np.array([x_grid[i, 0] * np.exp(1j * x_grid[i, 1]) 
+            grid_voltages = np.array([x_grid[i][0] * np.exp(1j * x_grid[i][1]) 
                                       for i in range(self.n_grid)])
 
         # Solve network with grid voltages as boundary conditions
+        # Convert gen_states list to numpy array (coordinator expects 2D array)
+        gen_states_array = np.array([gen_x[:min(7, len(gen_x))] for gen_x in gen_states])
+        
         Id, Iq, Vd, Vq = self.coordinator.solve_network(
-            gen_states,
+            gen_states_array,
             grid_voltages=grid_voltages,
             use_fault=use_fault,
             fault_bus=self.fault_bus,
             fault_impedance=self.fault_impedance
         )
 
-        # Component dynamics - Call each component's own dynamics function!
-        dxdt = np.zeros((self.n_gen, self.states_per_machine))
+        # Component dynamics - fully generic, works with any component state counts
+        dxdt_per_machine = []  # List of derivative vectors, one per machine
 
         for i in range(self.n_gen):
             # Get component cores and metadata
@@ -338,24 +353,25 @@ class ModularFaultSimulator:
             }
             exc_dxdt = exc_core._dynamics_fn(exc_x, exc_ports, exc_meta)
             
-            # Assemble into full derivative vector
-            dxdt[i, :self.n_gen_states] = gen_dxdt
-            dxdt[i, self.n_gen_states:self.n_gen_states+self.n_exc_states] = exc_dxdt
-            dxdt[i, self.n_gen_states+self.n_exc_states:] = gov_dxdt
+            # Assemble derivative vector for this machine (generic - handles any state count)
+            machine_dxdt = np.concatenate([gen_dxdt, exc_dxdt, gov_dxdt])
+            dxdt_per_machine.append(machine_dxdt)
 
-        # Grid dynamics - maintain constant voltage
-        dxdt_grid = np.zeros((self.n_grid, self.n_grid_states))
+        # Grid dynamics - maintain constant voltage (generic for any grid state count)
+        dxdt_grid = []
         for i in range(self.n_grid):
             grid_core = self.builder.grids[i]
             grid_meta = self.builder.grid_metadata[i]
-            grid_x = x_grid[i]
+            grid_x_i = x_grid[i]
             
             # Grid doesn't need ports (it's a voltage source)
             grid_ports = {}
-            dxdt_grid[i, :] = grid_core._dynamics_fn(grid_x, grid_ports, grid_meta)
+            grid_dxdt_i = grid_core._dynamics_fn(grid_x_i, grid_ports, grid_meta)
+            dxdt_grid.append(grid_dxdt_i)
 
-        # Concatenate generator and grid derivatives
-        return np.concatenate([dxdt.flatten(), dxdt_grid.flatten()])
+        # Flatten all derivatives into a single vector (fully generic)
+        dxdt_flat = np.concatenate(dxdt_per_machine + dxdt_grid)
+        return dxdt_flat
 
     def _get_param(self, core, name, default):
         """Extract parameter from component subs dictionary"""
@@ -403,10 +419,31 @@ class ModularFaultSimulator:
         dx0_check = self.dynamics(0.0, x0)
         max_deriv = np.max(np.abs(dx0_check))
         mean_deriv = np.mean(np.abs(dx0_check))
+        max_idx = np.argmax(np.abs(dx0_check))
         
         print(f"\nInitial condition quality:")
-        print(f"  Max |dx/dt|:  {max_deriv:.3e}")
+        print(f"  Max |dx/dt|:  {max_deriv:.3e} (at state index {max_idx}, value={dx0_check[max_idx]:.3e})")
         print(f"  Mean |dx/dt|: {mean_deriv:.3e}")
+        
+        # Identify which component has the largest derivative
+        offset = 0
+        for i in range(self.n_gen):
+            offsets = self.machine_state_offsets[i]
+            machine_start = offsets['gen_start']
+            machine_end = machine_start + offsets['total']
+            if machine_start <= max_idx < machine_end:
+                local_idx = max_idx - machine_start
+                if local_idx < self.gen_state_counts[i]:
+                    comp_name = f"Gen {i} (state {local_idx})"
+                elif local_idx < self.gen_state_counts[i] + self.exc_state_counts[i]:
+                    exc_local = local_idx - self.gen_state_counts[i]
+                    exc_model = self.builder.exciters[i].model_name
+                    comp_name = f"Gen {i} {exc_model} exciter (state {exc_local})"
+                else:
+                    gov_local = local_idx - self.gen_state_counts[i] - self.exc_state_counts[i]
+                    gov_model = self.builder.governors[i].model_name
+                    comp_name = f"Gen {i} {gov_model} governor (state {gov_local})"
+                print(f"  Largest derivative is in: {comp_name}")
         
         if max_deriv < 1e-2:
             print(f"  [OK] Excellent initialization from power flow - ready for simulation!")
@@ -428,13 +465,21 @@ class ModularFaultSimulator:
         last_print = [0]
         def monitor(t, x):
             if t - last_print[0] > 0.5:
-                # Extract generator states
-                gen_size = self.n_gen * self.states_per_machine
-                x_gen = x[:gen_size]
-                x_r = x_gen.reshape(self.n_gen, self.states_per_machine)
-                omegas = [x_r[i, 1] / self.builder.gen_metadata[i]['M'] for i in range(self.n_gen)]
+                # Extract generator states generically using individual offsets
+                omegas = []
+                deltas = []
+                for i in range(self.n_gen):
+                    offsets = self.machine_state_offsets[i]
+                    gen_start = offsets['gen_start']
+                    delta = x[gen_start]  # First state of generator is always delta
+                    p = x[gen_start + 1]  # Second state is always momentum p
+                    M = self.builder.gen_metadata[i]['M']
+                    omega = p / M
+                    omegas.append(omega)
+                    deltas.append(delta)
+                
                 omega_avg = np.mean(omegas)
-                delta_max = np.max(np.abs(np.degrees(x_r[:, 0])))
+                delta_max = np.max(np.abs(np.degrees(deltas)))
 
                 if self.fault_enabled:
                     status = "FAULT" if self.fault_start <= t < (self.fault_start + self.fault_duration) else "normal"
@@ -462,12 +507,56 @@ class ModularFaultSimulator:
         return sol
 
     def plot_results(self, sol, filename='fault_simulation.png'):
-        """Plot results"""
-        # Extract generator portion of state history
-        gen_size = self.n_gen * self.states_per_machine
-        x_gen_hist = sol.y[:gen_size, :].T  # Transpose to get time as first dimension
-        x_hist = x_gen_hist.reshape(-1, self.n_gen, self.states_per_machine)
+        """Plot results - fully generic for heterogeneous component state counts"""
         t = sol.t
+        x_hist = sol.y.T  # Shape: (n_time, n_states)
+        
+        # Extract time histories for each generator component (generic)
+        delta_hist = np.zeros((len(t), self.n_gen))
+        omega_hist = np.zeros((len(t), self.n_gen))
+        Efd_hist = np.zeros((len(t), self.n_gen))
+        Tm_hist = np.zeros((len(t), self.n_gen))
+        
+        for g in range(self.n_gen):
+            offsets = self.machine_state_offsets[g]
+            gen_start = offsets['gen_start']
+            exc_start = offsets['exc_start']
+            gov_start = offsets['gov_start']
+            
+            gen_meta = self.builder.gen_metadata[g]
+            exc_meta = self.builder.exc_metadata[g]
+            gov_meta = self.builder.gov_metadata[g]
+            
+            gen_core = self.builder.generators[g]
+            exc_core = self.builder.exciters[g]
+            gov_core = self.builder.governors[g]
+            
+            # Extract histories generically using actual state counts
+            for i in range(len(t)):
+                # Generator states: delta, p, ...
+                gen_x = x_hist[i, gen_start:gen_start + self.gen_state_counts[g]]
+                delta_hist[i, g] = gen_x[0]
+                omega_hist[i, g] = gen_x[1] / gen_meta['M']
+                
+                # Exciter Efd using output function (generic)
+                exc_x = x_hist[i, exc_start:exc_start + self.exc_state_counts[g]]
+                if exc_core.output_fn is not None:
+                    # Minimal ports for output function
+                    Vt = 1.0  # Placeholder - exact value not critical for plotting
+                    exc_ports = {'Vt': Vt, 'Vd': 0.0, 'Vq': Vt, 'Id': 0.0, 'Iq': 0.0, 'XadIfd': gen_x[4] if len(gen_x) > 4 else 1.0}
+                    Efd_hist[i, g] = exc_core.output_fn(exc_x, exc_ports, exc_meta)
+                else:
+                    # Fallback: second state
+                    Efd_hist[i, g] = exc_x[min(1, len(exc_x)-1)] if len(exc_x) > 1 else 1.0
+                
+                # Governor Tm using output function (generic - NO hardcoded equations)
+                gov_x = x_hist[i, gov_start:gov_start + self.gov_state_counts[g]]
+                if gov_core.output_fn is not None:
+                    gov_ports = {'omega': omega_hist[i, g]}
+                    Tm_hist[i, g] = gov_core.output_fn(gov_x, gov_ports, gov_meta)
+                else:
+                    # Fallback: last state
+                    Tm_hist[i, g] = gov_x[-1] if len(gov_x) > 0 else 1.0
 
         fig, axes = plt.subplots(2, 3, figsize=(15, 8))
         colors = ['b', 'r', 'g', 'm', 'c', 'y', 'k']  # Support more generators
@@ -477,41 +566,15 @@ class ModularFaultSimulator:
                 for ax in ax_row:
                     ax.axvspan(self.fault_start, self.fault_start + self.fault_duration, alpha=0.2, color='red')
 
+        # Plot all generators using pre-extracted generic histories
         for g in range(self.n_gen):
-            delta = np.degrees(x_hist[:, g, 0])
-            omega = x_hist[:, g, 1] / self.builder.gen_metadata[g]['M']
-            
-            # Extract Efd based on exciter type using output_fn
-            exc_offset = self.n_gen_states
-            exc_core = self.builder.exciters[g]
-            
-            if exc_core.output_fn is not None:
-                # Use output function for each time point
-                Efd = np.zeros(len(t))
-                for i, ti in enumerate(t):
-                    exc_x = x_hist[i, g, exc_offset:exc_offset+self.n_exc_states]
-                    # Simple ports dict (not all ports needed for output)
-                    exc_ports = {}
-                    Efd[i] = exc_core.output_fn(exc_x, exc_ports, self.builder.exc_metadata[g])
-            else:
-                # Fallback: assume Efd is second state for most exciters
-                Efd = x_hist[:, g, exc_offset + 1]
-            
-            # Governor states
-            gov_offset = self.n_gen_states + self.n_exc_states
-            x1 = x_hist[:, g, gov_offset + 0]
-            x2 = x_hist[:, g, gov_offset + 1]
-
-            gov_meta = self.builder.gov_metadata[g]
-            Tm = (gov_meta['T2']/gov_meta['T3']) * (x1 - x2) + x2 - gov_meta['Dt'] * (omega - 1.0)
-
             color = colors[g % len(colors)]
-            axes[0, 0].plot(t, delta, color, label=f'Gen {g+1}', linewidth=1.5)
-            axes[0, 1].plot(t, omega, color, linewidth=1.5)
-            axes[0, 2].plot(t, Efd, color, linewidth=1.5)
-            axes[1, 0].plot(t, Tm, color, linewidth=1.5)
-            axes[1, 1].plot(t, (omega - 1.0) * 60, color, linewidth=1.5)
-            axes[1, 2].plot(t, delta - delta[0], color, linewidth=1.5)
+            axes[0, 0].plot(t, np.degrees(delta_hist[:, g]), color, label=f'Gen {g+1}', linewidth=1.5)
+            axes[0, 1].plot(t, omega_hist[:, g], color, linewidth=1.5)
+            axes[0, 2].plot(t, Efd_hist[:, g], color, linewidth=1.5)
+            axes[1, 0].plot(t, Tm_hist[:, g], color, linewidth=1.5)
+            axes[1, 1].plot(t, (omega_hist[:, g] - 1.0) * 60, color, linewidth=1.5)
+            axes[1, 2].plot(t, np.degrees(delta_hist[:, g] - delta_hist[0, g]), color, linewidth=1.5)
 
         axes[0, 0].set_ylabel('Angle (deg)')
         axes[0, 0].legend()

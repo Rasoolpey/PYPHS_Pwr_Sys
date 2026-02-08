@@ -742,46 +742,49 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
     if verbose:
         print(f"\nBuilding state vector for all components...")
     
-    # Determine state vector size
-    if n_gen > 0:
-        n_gen_states = 7  # Standard generator states
-        n_exc_states = builder.exciters[0].n_states if hasattr(builder, 'exciters') else 0
-        n_gov_states = builder.governors[0].n_states if hasattr(builder, 'governors') else 0
-        states_per_machine = n_gen_states + n_exc_states + n_gov_states
-    else:
-        states_per_machine = 0
-        n_gen_states = 0
-        n_exc_states = 0
-        n_gov_states = 0
+    # Build state index map for heterogeneous components (same as fault_sim_modular.py)
+    gen_state_counts = [gen.n_states for gen in builder.generators] if n_gen > 0 else []
+    exc_state_counts = [exc.n_states for exc in builder.exciters] if n_gen > 0 else []
+    gov_state_counts = [gov.n_states for gov in builder.governors] if n_gen > 0 else []
     
-    n_grid_states = 2  # [V_mag, theta]
+    machine_state_lists = []  # List of state vectors, one per machine (generic)
+    grid_state_lists = []  # List of state vectors, one per grid
     
-    # Allocate state arrays
-    x0_gen = np.zeros((n_gen, states_per_machine)) if n_gen > 0 else np.array([])
-    x0_grid = np.zeros((n_grid, n_grid_states)) if n_grid > 0 else np.array([])
-    
-    # --- Initialize Generator States ---
+    # --- Initialize Each Generator's States (fully generic) ---
     for i in range(n_gen):
         meta = builder.gen_metadata[i]
         omega_b = meta['omega_b']
         M = meta['M']
         ra = meta['ra']
         
-        # Core generator states (always present for synchronous machines)
+        # Allocate state vector for this machine (generic sizes)
+        n_gen_states = gen_state_counts[i]
+        n_exc_states = exc_state_counts[i]
+        n_gov_states = gov_state_counts[i]
+        machine_states = []
+        
+        # Core generator states (always 7 for GENROU - but flexible)
         psi_d = (Vq[i] + ra * Iq[i]) / omega_b
         psi_q = -(Vd[i] + ra * Id[i]) / omega_b
         
-        x0_gen[i, 0] = delta_vals[i]  # delta
-        x0_gen[i, 1] = M * 1.0         # p = M * omega (omega=1 at equilibrium)
-        x0_gen[i, 2] = psi_d           # psi_d
-        x0_gen[i, 3] = psi_q           # psi_q
-        x0_gen[i, 4] = psi_f_vals[i]   # psi_f
-        x0_gen[i, 5] = 0.0             # psi_kd
-        x0_gen[i, 6] = 0.0             # psi_kq
+        gen_x0 = np.zeros(n_gen_states)
+        gen_x0[0] = delta_vals[i]  # delta
+        gen_x0[1] = M * 1.0         # p = M * omega (omega=1 at equilibrium)
+        if n_gen_states > 2:
+            gen_x0[2] = psi_d       # psi_d
+        if n_gen_states > 3:
+            gen_x0[3] = psi_q       # psi_q
+        if n_gen_states > 4:
+            gen_x0[4] = psi_f_vals[i]  # psi_f
+        if n_gen_states > 5:
+            gen_x0[5] = 0.0         # psi_kd  
+        if n_gen_states > 6:
+            gen_x0[6] = 0.0         # psi_kq
         
-        # --- Initialize Exciter States (if present) ---
+        machine_states.append(gen_x0)
+        
+        # --- Initialize Exciter States (generic for any exciter model) ---
         if n_exc_states > 0:
-            exc_offset = n_gen_states
             exc_core = builder.exciters[i]
             exc_meta = builder.exc_metadata[i]
             
@@ -811,125 +814,23 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
                 gen_type = "SLACK" if i in slack_gen_indices else "PV"
                 print(f"  Gen {i} ({gen_type}): psi_f={psi_f_vals[i]:.3f}, Efd_target={Efd_target:.3f}")
             
-            # Model-specific initialization
-            if exc_core.model_name == 'ESST3A':
-                # ESST3A states: [LG_y, LL_exc_x, VR, VM, VB_state]
-                # Must trace through the full signal path to find equilibrium.
-                #
-                # Signal path at steady state:
-                #   LG_y = Vt (voltage transducer converged)
-                #   VB = VE * FEX (rectifier voltage from terminal V, I)
-                #   VB_state = VB (fast lag converged)
-                #   VM = Efd / VB (since Efd = VB * VM)
-                #   vrs = VM / KM (inner regulator converged: VM = KM * vrs)
-                #   VG = KG * Efd (feedback)
-                #   VR = vrs + VG (regulator output)
-                #   vil = VR / KA (outer regulator converged: VR = KA * vil)
-                #   LL_exc_x = vil (lead-lag converged)
-                #   vref = Vt + vil (error signal zero condition)
-
-                KM = exc_meta.get('KM', 8.0)
-                KG = exc_meta.get('KG', 1.0)
-                KA = exc_meta.get('KA', 20.0)
-                KP = exc_meta.get('KP', 3.67)
-                KI_exc = exc_meta.get('KI', 0.435)
-                XL_exc = exc_meta.get('XL', 0.0098)
-                KC = exc_meta.get('KC', 0.01)
-                THETAP = exc_meta.get('THETAP', 0.0)
-                VBMAX = exc_meta.get('VBMAX', 5.48)
-                VIMAX = exc_meta.get('VIMAX', 0.2)
-                VIMIN = exc_meta.get('VIMIN', -0.2)
-
-                # Compute VE from terminal voltage/current phasors
-                KPC = KP * np.exp(1j * np.radians(THETAP))
-                z1 = KPC * (Vd[i] + 1j * Vq[i])
-                z2 = 1j * (KI_exc + KPC * XL_exc) * (Id[i] + 1j * Iq[i])
-                VE = np.abs(z1 + z2)
-
-                # Rectifier regulation: FEX(IN)
-                XadIfd = psi_f_vals[i]
-                IN = KC * XadIfd / VE if VE > 1e-6 else 0.0
-                if IN <= 0:
-                    FEX = 1.0
-                elif IN <= 0.433:
-                    FEX = 1.0 - 0.577 * IN
-                elif IN <= 0.75:
-                    FEX = np.sqrt(0.75 - IN**2)
-                elif IN <= 1.0:
-                    FEX = 1.732 * (1.0 - IN)
-                else:
-                    FEX = 0.0
-
-                VB_eq = np.clip(VE * FEX, 0.0, VBMAX)
-
-                # Trace back from Efd through the signal path
-                VM_eq = Efd_target / VB_eq if VB_eq > 1e-6 else 1.0
-                vrs_eq = VM_eq / KM
-                VG_eq = KG * Efd_target
-                VR_eq = vrs_eq + VG_eq
-                vil_eq = VR_eq / KA
-                LL_exc_x_eq = vil_eq
-                Vref_correct = V_mag[i] + np.clip(vil_eq, VIMIN, VIMAX)
-
-                # Set states: [LG_y, LL_exc_x, VR, VM, VB_state]
-                x0_gen[i, exc_offset + 0] = V_mag[i]      # LG_y = Vt
-                x0_gen[i, exc_offset + 1] = LL_exc_x_eq   # Lead-lag state
-                x0_gen[i, exc_offset + 2] = VR_eq          # Regulator output
-                x0_gen[i, exc_offset + 3] = VM_eq           # Inner regulator
-                x0_gen[i, exc_offset + 4] = VB_eq           # Rectifier voltage
-
-                if verbose:
-                    print(f"    ESST3A init: VB={VB_eq:.3f}, VM={VM_eq:.3f}, VR={VR_eq:.3f}")
-
-                # Update Vref
-                for key in exc_core.subs.keys():
-                    if 'Vref' in str(key) or 'vref' in str(key):
-                        exc_core.subs[key] = Vref_correct
-                        break
-                exc_meta['vref'] = Vref_correct
-                
-            elif exc_core.model_name == 'EXDC2':
-                # Full EXDC2 states: [vm, vr, efd, xf]
-                # At steady state:
-                #   vm = Vt
-                #   xf = efd (rate feedback filter converged)
-                #   Vf = KF*(efd-xf)/TF1 = 0 (no feedback at equilibrium)
-                #   vr = (KE + SE(efd)) * efd (exciter equilibrium)
-                #   Vref = Vt + vr/KA (amplifier equilibrium)
-                KE = exc_meta.get('KE', 1.0)
-                KA = exc_meta.get('KA', 20.0)
-
-                # Compute saturation at Efd (SE=0 when E1=0)
-                from components.exciters.exdc2 import _compute_saturation
-                SE_efd = _compute_saturation(Efd_target, exc_meta)
-
-                vr_eq = (KE + SE_efd) * Efd_target
-
-                x0_gen[i, exc_offset + 0] = V_mag[i]      # vm = Vt
-                x0_gen[i, exc_offset + 1] = vr_eq          # vr = (KE+SE)*Efd
-                x0_gen[i, exc_offset + 2] = Efd_target     # efd
-                x0_gen[i, exc_offset + 3] = Efd_target     # xf = efd at equilibrium
-
-                # Update Vref for steady-state balance
-                Vref_correct = V_mag[i] + vr_eq / KA
-                for key in exc_core.subs.keys():
-                    if 'Vref' in str(key) or 'vref' in str(key):
-                        exc_core.subs[key] = Vref_correct
-                        break
-                exc_meta['vref'] = Vref_correct  # Use lowercase for consistency
+            # GENERIC initialization - call component's init_fn (NO hardcoded model logic)
+            if exc_core.init_fn is not None:
+                exc_x0 = exc_core.init_fn(Efd_eq=Efd_target, V_mag=V_mag[i])
             else:
-                # Generic fallback
-                for j in range(n_exc_states):
-                    if j == 0:
-                        x0_gen[i, exc_offset + j] = V_mag[i]
-                    elif j == 1:
-                        x0_gen[i, exc_offset + j] = Efd_target
-                    else:
-                        x0_gen[i, exc_offset + j] = 0.0
+                # Fallback if init_fn not provided (should not happen with proper components)
+                exc_x0 = np.zeros(n_exc_states)
+                exc_x0[0] = V_mag[i]
+                if n_exc_states > 1:
+                    exc_x0[1] = Efd_target
+            
+            machine_states.append(exc_x0)
+        else:
+            # No exciter - skip this component
+            pass
         
-        # --- Initialize Governor States (if present) ---
+        # --- Initialize Governor States (generic for any governor model) ---
         if n_gov_states > 0:
-            gov_offset = n_gen_states + n_exc_states
             
             # Mechanical power = electrical power at equilibrium
             # Pm must match Pe exactly for zero initial derivatives
@@ -946,26 +847,36 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
                     print(f"  Gen {i} ({gen_type}): WARNING - negative Pm={Pm_eq:.3f}, clamping to 0.0")
                 Pm_eq = 0.0
             
-            # Governor model-specific initialization
+            # Governor initialization (fully generic using init_fn)
             if hasattr(builder, 'governors') and i < len(builder.governors):
                 gov_core = builder.governors[i]
-                if gov_core.model_name == 'TGOV1':
-                    x0_gen[i, gov_offset + 0] = Pm_eq
-                    x0_gen[i, gov_offset + 1] = Pm_eq
+                
+                if gov_core.init_fn is not None:
+                    gov_x0 = gov_core.init_fn(Pm_eq=Pm_eq)
                 else:
-                    # Generic: all governor states = Pm
+                    # Fallback: all governor states = Pm_eq
+                    gov_x0 = np.zeros(n_gov_states)
                     for j in range(n_gov_states):
-                        x0_gen[i, gov_offset + j] = Pm_eq
+                        gov_x0[j] = Pm_eq
+                
+                machine_states.append(gov_x0)
                 
                 # Update governor reference
                 builder.gov_metadata[i]['Pref'] = Pm_eq
                 builder.gov_metadata[i]['wref'] = 1.0
+        else:
+            # No governor - skip this component
+            pass
+        
+        # Concatenate all states for this machine and add to list
+        machine_x0 = np.concatenate(machine_states)
+        machine_state_lists.append(machine_x0)
     
-    # --- Initialize Grid/Slack Bus States ---
+    # --- Initialize Grid/Slack Bus States (generic) ---
     for i in range(n_grid):
         grid_meta = builder.grid_metadata[i]
-        x0_grid[i, 0] = grid_meta['V_ref']
-        x0_grid[i, 1] = grid_meta['theta_ref']
+        grid_x0 = np.array([grid_meta['V_ref'], grid_meta['theta_ref']])
+        grid_state_lists.append(grid_x0)
     
     # ========================================================================
     # PART 4: NETWORK CONSISTENCY CHECK & ADJUSTMENT
@@ -974,12 +885,22 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
         if verbose:
             print(f"\nAdjusting for network consistency...")
 
-        # Get actual electrical quantities from network solver
-        gen_states = x0_gen[:, :7]
+        # Extract generator states for network solver (first 7 states of each machine)
+        gen_states = []
+        for machine_x0 in machine_state_lists:
+            # Extract first 7 (or fewer) states for generator
+            gen_x = machine_x0[:min(7, len(machine_x0))]
+            # Pad to 7 if needed (though GENROU always has 7)
+            if len(gen_x) < 7:
+                gen_x = np.concatenate([gen_x, np.zeros(7 - len(gen_x))])
+            gen_states.append(gen_x)
+        gen_states = np.array(gen_states)
+        
+        # Get grid voltages
         grid_voltages = None
         if n_grid > 0:
-            grid_voltages = np.array([x0_grid[i, 0] * np.exp(1j * x0_grid[i, 1])
-                                      for i in range(n_grid)])
+            grid_voltages = np.array([grid_x[0] * np.exp(1j * grid_x[1])
+                                      for grid_x in grid_state_lists])
 
         Id_net, Iq_net, Vd_net, Vq_net = coordinator.solve_network(gen_states, grid_voltages=grid_voltages)
         P_elec = Vd_net * Id_net + Vq_net * Iq_net
@@ -994,109 +915,78 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
             psi_d_new = (Vq_net[i] + ra * Iq_net[i]) / omega_b
             psi_q_new = -(Vd_net[i] + ra * Id_net[i]) / omega_b
 
-            if verbose:
-                psi_d_old = x0_gen[i, 2]
-                psi_q_old = x0_gen[i, 3]
-                if abs(psi_d_new - psi_d_old) > 1e-4 or abs(psi_q_new - psi_q_old) > 1e-4:
+            # Update machine state list (generic - works for any state count)
+            machine_x = machine_state_lists[i]
+            if len(machine_x) > 2:
+                psi_d_old = machine_x[2]
+            if len(machine_x) > 3:
+                psi_q_old = machine_x[3]
+                
+                if verbose and abs(psi_d_new - psi_d_old) > 1e-4:
                     print(f"  Gen {i}: psi_d adjusted {psi_d_old:.4f} -> {psi_d_new:.4f}, "
                           f"psi_q adjusted {psi_q_old:.4f} -> {psi_q_new:.4f}")
+                
+                machine_x[2] = psi_d_new
+                machine_x[3] = psi_q_new
 
-            x0_gen[i, 2] = psi_d_new
-            x0_gen[i, 3] = psi_q_new
-
-        # Refine exciter states using actual network terminal voltage and currents
-        if n_exc_states > 0:
-            for i in range(n_gen):
-                exc_offset = n_gen_states
+        # Refine exciter states using actual network quantities (FULLY GENERIC)
+        for i in range(n_gen):
+            if exc_state_counts[i] > 0:
                 exc_core = builder.exciters[i]
                 exc_meta = builder.exc_metadata[i]
-                gen_meta = builder.gen_metadata[i]  # Need generator parameters for Efd calculation
+                gen_meta = builder.gen_metadata[i]
                 
                 # Compute actual terminal voltage magnitude from network solution
                 Vt_actual = np.sqrt(Vd_net[i]**2 + Vq_net[i]**2)
                 
-                # Update voltage measurement state (LG_y / vm) - first exciter state
-                x0_gen[i, exc_offset + 0] = Vt_actual
+                # Recompute Efd_target from actual psi_f (may have been adjusted)
+                xd = gen_meta['xd']
+                xl = gen_meta['xl']
+                xd1 = gen_meta['xd1']
+                Xad = xd - xl
+                Xfl = (Xad * (xd1 - xl)) / (Xad - (xd1 - xl))
+                Lf = Xad + Xfl
+                Kfd_scale = Lf * 2.0
                 
-                # For ESST3A: re-compute VB_state using actual network V/I
-                if exc_core.model_name == 'ESST3A':
-                    # Recompute Efd_target from psi_f (field flux state)
-                    xd = gen_meta['xd']
-                    xl = gen_meta['xl']
-                    xd1 = gen_meta['xd1']
-                    Xad = xd - xl
-                    Xfl = (Xad * (xd1 - xl)) / (Xad - (xd1 - xl))
-                    Lf = Xad + Xfl
-                    Kfd_scale = Lf * 2.0
-                    psi_f = x0_gen[i, 4]  # Field flux from generator state
-                    Efd_target = psi_f / Kfd_scale
-                    
-                    KI_exc = exc_meta.get('KI', 0.0)
-                    KP = exc_meta.get('KP', 1.0)
-                    THETAP = exc_meta.get('THETAP', 0.0)
-                    XL_exc = exc_meta.get('XL', 0.0)
-                    KC = exc_meta.get('KC', 0.2)
-                    VBMAX = exc_meta.get('VBMAX', 10.0)
-                    KM = exc_meta.get('KM', 1.0)
-                    KG = exc_meta.get('KG', 0.0)
-                    KA = exc_meta.get('KA', 200.0)
-                    VIMAX = exc_meta.get('VIMAX', 0.5)
-                    VIMIN = exc_meta.get('VIMIN', -0.5)
-                    
-                    # Compute VE from actual network terminal voltage/current phasors
-                    KPC = KP * np.exp(1j * np.radians(THETAP))
-                    z1 = KPC * (Vd_net[i] + 1j * Vq_net[i])
-                    z2 = 1j * (KI_exc + KPC * XL_exc) * (Id_net[i] + 1j * Iq_net[i])
-                    VE = np.abs(z1 + z2)
-                    
-                    # Get XadIfd from generator field flux (psi_f is state 4)
-                    psi_f = x0_gen[i, 4]
-                    XadIfd = psi_f
-                    
-                    # Compute rectifier regulation FEX(IN)
-                    IN = KC * XadIfd / VE if VE > 1e-6 else 0.0
-                    
-                    # FEX function (IEEE ESST3A model)
-                    if IN <= 0.433:
-                        FEX = 1.0 - 0.577 * IN
-                    elif IN <= 0.75:
-                        FEX = np.sqrt(0.75 - IN**2)
-                    elif IN < 1.0:
-                        FEX = 1.732 * (1.0 - IN)
-                    else:
-                        FEX = 0.0
-                    
-                    # Compute VB using actual network quantities
-                    VB_actual = np.clip(VE * FEX, 0.0, VBMAX)
-                    
-                    # Back-calculate VM, VR, LL_exc_x using target Efd (already computed from psi_f above)
-                    VM_actual = Efd_target / VB_actual if VB_actual > 1e-6 else 1.0
-                    
-                    # Trace back through regulators
-                    vrs_eq = VM_actual / KM
-                    VG_eq = KG * Efd_target
-                    VR_actual = vrs_eq + VG_eq
-                    vil_eq = VR_actual / KA
-                    LL_exc_x_actual = vil_eq
-                    
-                    # Re-compute Vref using actual Vt and regulator input
-                    Vref_actual = Vt_actual + np.clip(vil_eq, VIMIN, VIMAX)
-                    
-                    # Update ESST3A states with refined values
-                    x0_gen[i, exc_offset + 1] = LL_exc_x_actual  # LL_exc_x
-                    x0_gen[i, exc_offset + 2] = VR_actual         # VR
-                    x0_gen[i, exc_offset + 3] = VM_actual         # VM
-                    x0_gen[i, exc_offset + 4] = VB_actual         # VB_state
-                    exc_meta['vref'] = Vref_actual  # Use lowercase to match Part 3
+                # Calculate state offsets within this machine's state vector
+                n_gen_states_i = gen_state_counts[i]
+                exc_offset = n_gen_states_i
+                
+                machine_x = machine_state_lists[i]
+                psi_f_actual = machine_x[4]  # Generator state 4
+                Efd_actual = psi_f_actual / Kfd_scale
+                
+                # Re-initialize exciter with actual network quantities (GENERIC)
+                if exc_core.init_fn is not None:
+                    exc_x_refined = exc_core.init_fn(
+                        Efd_eq=Efd_actual,
+                        V_mag=Vt_actual,
+                        Vd=Vd_net[i],
+                        Vq=Vq_net[i],
+                        Id=Id_net[i],
+                        Iq=Iq_net[i],
+                        psi_f=psi_f_actual
+                    )
+                    # Update exciter states
+                    for j in range(exc_state_counts[i]):
+                        machine_x[exc_offset + j] = exc_x_refined[j]
                     
                     if verbose:
-                        print(f"  Gen {i}: ESST3A refined with actual network V/I: "
-                              f"VB {VB_actual:.4f}, VM {VM_actual:.4f}, Vref {Vref_actual:.4f}")
+                        print(f"  Gen {i}: {exc_core.model_name} refined with actual network V/I")
+                else:
+                    # Fallback: just update voltage measurement
+                    machine_x[exc_offset + 0] = Vt_actual
 
-        # Adjust mechanical power to match electrical power (accounting for governor limits)
-        if n_gov_states > 0:
-            for i in range(n_gen):
-                gov_offset = n_gen_states + n_exc_states
+
+
+        # Adjust mechanical power to match electrical power (generic for heterogeneous governors)
+        for i in range(n_gen):
+            if gov_state_counts[i] > 0:
+                n_gen_states_i = gen_state_counts[i]
+                n_exc_states_i = exc_state_counts[i]
+                gov_offset = n_gen_states_i + n_exc_states_i
+                
+                machine_x = machine_state_lists[i]
                 gov_core = builder.governors[i]
                 gov_meta = builder.gov_metadata[i]
                 
@@ -1109,53 +999,35 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
                         print(f"  Gen {i} ({gen_type}): WARNING - negative network Pm={Pm_adjusted:.3f}, clamping to 0.0")
                     Pm_adjusted = 0.0
                 
-                # Apply governor gate limits (VMIN, VMAX)
-                if gov_core.model_name == 'TGOV1':
-                    VMIN = gov_meta.get('VMIN', 0.0)
-                    VMAX = gov_meta.get('VMAX', 1.0)
-                    R = gov_meta.get('R', 0.05)
-                    
-                    # Gate output at equilibrium (omega=1.0): gate = clip(Pref + speed_error/R, VMIN, VMAX)
-                    # At equilibrium, speed_error=0, so gate = clip(Pref, VMIN, VMAX)
-                    # We want gate = Pm_adjusted (after network solution)
-                    gate_eq = np.clip(Pm_adjusted, VMIN, VMAX)
-                    
-                    # Set both lag states (x1, x2) to gate output at equilibrium
-                    x0_gen[i, gov_offset + 0] = gate_eq  # x1
-                    x0_gen[i, gov_offset + 1] = gate_eq  # x2 = Pm
-                    
-                    # Set Pref such that gate = clip(Pref, VMIN, VMAX) = gate_eq
-                    # If Pm_adjusted is within [VMIN, VMAX], then Pref = Pm_adjusted
-                    # If Pm_adjusted is outside, then Pref can be set to the clipped value
-                    builder.gov_metadata[i]['Pref'] = gate_eq
-                    
-                    if verbose and abs(gate_eq - Pm_adjusted) > 1e-4:
-                        print(f"  Gen {i}: Governor gate limit applied: "
-                              f"Pm={Pm_adjusted:.4f} -> gate={gate_eq:.4f} (VMIN={VMIN}, VMAX={VMAX})")
+                # Generic governor adjustment: re-initialize with adjusted Pm
+                if gov_core.init_fn is not None:
+                    gov_x_adjusted = gov_core.init_fn(Pm_eq=Pm_adjusted)
+                    for j in range(gov_state_counts[i]):
+                        machine_x[gov_offset + j] = gov_x_adjusted[j]
                 else:
-                    # Generic governor: set all states to Pm_adjusted
-                    x0_gen[i, gov_offset:gov_offset+n_gov_states] = Pm_adjusted
-                    builder.gov_metadata[i]['Pref'] = Pm_adjusted
+                    # Fallback: set all states to Pm_adjusted
+                    for j in range(gov_state_counts[i]):
+                        machine_x[gov_offset + j] = Pm_adjusted
+                
+                builder.gov_metadata[i]['Pref'] = Pm_adjusted
     
     # ========================================================================
-    # PART 5: ASSEMBLE FINAL STATE VECTOR
+    # PART 5: ASSEMBLE FINAL STATE VECTOR (fully generic)
     # ========================================================================
-    if n_gen > 0 and n_grid > 0:
-        x0 = np.concatenate([x0_gen.flatten(), x0_grid.flatten()])
-    elif n_gen > 0:
-        x0 = x0_gen.flatten()
-    elif n_grid > 0:
-        x0 = x0_grid.flatten()
-    else:
-        x0 = np.array([])
+    # Concatenate all machine state vectors and grid state vectors
+    all_states = machine_state_lists + grid_state_lists
+    x0 = np.concatenate(all_states) if all_states else np.array([])
     
     if verbose:
         print(f"\nInitial state vector built:")
         print(f"  Total states: {len(x0)}")
         if n_gen > 0:
-            print(f"  Generator states: {n_gen * states_per_machine}")
+            total_machine_states = sum(len(m) for m in machine_state_lists)
+            print(f"  Machine states: {total_machine_states}")
+            print(f"    Per-machine state counts: Gen={gen_state_counts}, Exc={exc_state_counts}, Gov={gov_state_counts}")
         if n_grid > 0:
-            print(f"  Grid states: {n_grid * n_grid_states}")
+            total_grid_states = sum(len(g) for g in grid_state_lists)
+            print(f"  Grid states: {total_grid_states}")
         print("\n" + "="*80)
         print("  INITIAL CONDITIONS COMPLETE")
         print("="*80)

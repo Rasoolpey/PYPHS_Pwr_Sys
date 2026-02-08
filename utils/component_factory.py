@@ -22,9 +22,18 @@ class ComponentFactory:
             # Exciters
             'EXDC2': {'category': 'exciter', 'module': 'exdc2'},
             'ESST3A': {'category': 'exciter', 'module': 'esst3a'},
+            'EXST1': {'category': 'exciter', 'module': 'exst1'},
             
             # Governors
             'TGOV1': {'category': 'governor', 'module': 'tgov1'},
+            'IEEEG1': {'category': 'governor', 'module': 'ieeeg1'},
+            
+            # Power System Stabilizers (PSS)
+            'IEEEST': {'category': 'pss', 'module': 'ieeest'},
+            'ST2CUT': {'category': 'pss', 'module': 'st2cut'},
+            
+            # Measurement devices
+            'BusFreq': {'category': 'measurement', 'module': 'busfreq'},
             
             # Grid elements
             'Slack': {'category': 'grid', 'module': 'infinite_bus'},
@@ -127,6 +136,44 @@ class ComponentFactory:
         module = importlib.import_module(f'components.grid.{module_name}')
         build_func = getattr(module, f'build_{module_name}_core')
         return build_func(grid_data)
+    
+    def build_pss(self, model_type, pss_data):
+        """Build PSS (Power System Stabilizer) component
+        
+        Args:
+            model_type: str, e.g., 'IEEEST', 'ST2CUT'
+            pss_data: dict with parameters
+        
+        Returns:
+            core
+        """
+        model_info = self.model_registry.get(model_type)
+        if not model_info or model_info['category'] != 'pss':
+            raise ValueError(f"Unknown PSS model: {model_type}")
+        
+        module_name = model_info['module']
+        module = importlib.import_module(f'components.pss.{module_name}')
+        build_func = getattr(module, f'build_{module_name}_core')
+        return build_func(pss_data)
+    
+    def build_measurement(self, model_type, meas_data):
+        """Build measurement device component
+        
+        Args:
+            model_type: str, e.g., 'BusFreq'
+            meas_data: dict with parameters
+        
+        Returns:
+            core
+        """
+        model_info = self.model_registry.get(model_type)
+        if not model_info or model_info['category'] != 'measurement':
+            raise ValueError(f"Unknown measurement model: {model_type}")
+        
+        module_name = model_info['module']
+        module = importlib.import_module(f'components.grid.{module_name}')
+        build_func = getattr(module, f'build_{module_name}_core')
+        return build_func(meas_data)
     
     def build_network(self, system_data):
         """Build network from system data

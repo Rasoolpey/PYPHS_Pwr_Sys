@@ -111,6 +111,7 @@ class DynamicsCore(Core):
         # Component interface attributes (set by builder functions)
         self.n_states = 0
         self.output_fn = None
+        self.init_fn = None  # Function to compute equilibrium initial states
         self.component_type = None
         self.model_name = None
 

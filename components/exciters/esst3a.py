@@ -307,7 +307,93 @@ def build_esst3a_core(exc_data):
     # Set component interface attributes
     core.n_states = 5
     core.output_fn = esst3a_output
+    # Proper initialization function that computes all states correctly
+    core.init_fn = lambda Efd_eq, V_mag, **kwargs: esst3a_initialize(Efd_eq, V_mag, metadata, **kwargs)
     core.component_type = "exciter"
     core.model_name = "ESST3A"
     
     return core, metadata
+
+
+def esst3a_initialize(Efd_target, Vt, metadata, Vd=0.0, Vq=None, Id=0.0, Iq=0.0, psi_f=1.0):
+    """
+    Compute equilibrium initial states for ESST3A exciter.
+    
+    At equilibrium, all derivatives = 0:
+        LG_y = Vt (voltage measurement converged)
+        VB_state = VE * FEX (rectifier converged)
+        VM = Efd / VB (multiplier output)
+        VR = VM * KM + KG * Efd (regulator chain)
+        LL_exc_x = VR / KA (lead-lag input)
+        Vref = Vt + LL_exc_x (clamped to VIMAX/VIMIN)
+    
+    Args:
+        Efd_target: Desired field voltage
+        Vt: Terminal voltage magnitude
+        metadata: ESST3A parameters
+        Vd, Vq, Id, Iq: Network quantities for VE calculation
+        psi_f: Generator field flux
+        
+    Returns:
+        x0: numpy array [LG_y, LL_exc_x, VR, VM, VB_state]
+    """
+    # If Vq not provided, assume Vt is the magnitude
+    if Vq is None:
+        Vq = Vt
+        Vd = 0.0
+    
+    # Extract parameters
+    KM = metadata.get('KM', 8.0)
+    KG = metadata.get('KG', 1.0)
+    KA = metadata.get('KA', 20.0)
+    KP = metadata.get('KP', 3.67)
+    KI_exc = metadata.get('KI', 0.435)
+    XL_exc = metadata.get('XL', 0.0098)
+    KC = metadata.get('KC', 0.01)
+    THETAP = metadata.get('THETAP', 0.0)
+    VBMAX = metadata.get('VBMAX', 5.48)
+    VIMAX = metadata.get('VIMAX', 0.2)
+    VIMIN = metadata.get('VIMIN', -0.2)
+    
+    # Compute VE from terminal voltage/current (load compensated)
+    KPC = KP * np.exp(1j * np.radians(THETAP))
+    z1 = KPC * (Vd + 1j * Vq)
+    z2 = 1j * (KI_exc + KPC * XL_exc) * (Id + 1j * Iq)
+    VE = np.abs(z1 + z2)
+    
+    # Rectifier regulation: FEX(IN) where IN = KC * XadIfd / VE
+    XadIfd = psi_f
+    IN = KC * XadIfd / VE if VE > 1e-6 else 0.0
+    
+    # FEX function (IEEE ESST3A standard)
+    if IN <= 0:
+        FEX = 1.0
+    elif IN <= 0.433:
+        FEX = 1.0 - 0.577 * IN
+    elif IN <= 0.75:
+        FEX = np.sqrt(0.75 - IN**2)
+    elif IN < 1.0:
+        FEX = 1.732 * (1.0 - IN)
+    else:
+        FEX = 0.0
+    
+    # Rectifier voltage
+    VB_eq = np.clip(VE * FEX, 0.0, VBMAX)
+    
+    # Trace backwards from Efd through control chain
+    VM_eq = Efd_target / VB_eq if VB_eq > 1e-6 else 1.0
+    vrs_eq = VM_eq / KM if KM > 1e-6 else 0.0
+    VG_eq = KG * Efd_target
+    VR_eq = vrs_eq + VG_eq
+    vil_eq = VR_eq / KA if KA > 1e-6 else 0.0
+    LL_exc_x_eq = vil_eq
+    
+    # Voltage reference (equilibrium condition)
+    Vref_eq = Vt + np.clip(vil_eq, VIMIN, VIMAX)
+    
+    # Update metadata with equilibrium Vref
+    metadata['vref'] = Vref_eq
+    
+    # Return initial states: [LG_y, LL_exc_x, VR, VM, VB_state]
+    return np.array([Vt, LL_exc_x_eq, VR_eq, VM_eq, VB_eq])
+

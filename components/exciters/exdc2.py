@@ -251,6 +251,7 @@ def build_exdc2_core(exc_data):
     # Set component interface attributes
     core.n_states = 4
     core.output_fn = exdc2_output
+    core.init_fn = lambda Efd_eq, V_mag, **kwargs: np.array([V_mag, Efd_eq, Efd_eq, Efd_eq])
     core.component_type = "exciter"
     core.model_name = "EXDC2"
 
