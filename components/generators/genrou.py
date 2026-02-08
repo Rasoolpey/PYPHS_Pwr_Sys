@@ -67,9 +67,9 @@ def genrou_dynamics(x, ports, meta):
     x_dot[0] = omega_b * (omega - 1.0)  # d(delta)/dt
     x_dot[1] = Tm - Te - D * (omega - 1.0)  # d(p)/dt = M * d(omega)/dt
 
-    # Stator flux linkage equations
-    x_dot[2] = Vd - ra * Id + omega_b * omega * psi_q  # d(psi_d)/dt
-    x_dot[3] = Vq - ra * Iq - omega_b * omega * psi_d  # d(psi_q)/dt
+    # Stator flux linkage equations (generator convention: +ra*I for dissipation)
+    x_dot[2] = Vd + ra * Id + omega_b * omega * psi_q  # d(psi_d)/dt
+    x_dot[3] = Vq + ra * Iq - omega_b * omega * psi_d  # d(psi_q)/dt
 
     # Rotor flux dynamics
     # Efd from exciter is on field voltage base (≈1 pu at rated conditions)

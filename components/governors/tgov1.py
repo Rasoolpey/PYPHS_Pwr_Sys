@@ -48,9 +48,9 @@ def tgov1_dynamics(x, ports, meta):
     # State derivatives
     x_dot = np.zeros(2)
 
-    # Governor dynamics
-    x_dot[0] = 10.0 * (gate_limited - x1) / T1  # d(x1)/dt - valve dynamics
-    x_dot[1] = 10.0 * (x1 - x2) / T3  # d(x2)/dt - turbine dynamics
+    # Governor dynamics (standard TGOV1 transfer functions)
+    x_dot[0] = (gate_limited - x1) / T1  # d(x1)/dt - valve dynamics
+    x_dot[1] = (x1 - x2) / T3  # d(x2)/dt - turbine dynamics
 
     return x_dot
 

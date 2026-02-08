@@ -1,28 +1,89 @@
-"""EXDC2 Exciter Model"""
+"""EXDC2 Exciter Model - Full IEEE Standard Implementation"""
 import sys
 sys.path.insert(0, '/home/claude')
 from utils.pyphs_core import DynamicsCore
 import numpy as np
 
 
-def exdc2_dynamics(x, ports, meta):
+def _compute_saturation(Efd, meta):
     """
-    Numerical dynamics for EXDC2 exciter.
+    Compute saturation factor SE(Efd) from IEEE saturation data.
+
+    Uses quadratic saturation model: SE(E) = B * (E - A)^2 / E
+    where A, B are derived from (E1, SE1) and (E2, SE2).
+
+    When E1=0 or E2=0, saturation is disabled (returns 0).
 
     Args:
-        x: numpy array of 4 states [vm, vr1, vr2, vf]
-           vm: voltage measurement
-           vr1: regulator output (Efd)
-           vr2: lead-lag state
-           vf: feedback state
-        ports: dict with keys {'Vt'}
+        Efd: Field voltage magnitude
+        meta: dict with E1, SE1, E2, SE2
+
+    Returns:
+        SE: Saturation factor at Efd
+    """
+    E1 = meta.get('E1', 0.0)
+    SE1 = meta.get('SE1', 0.0)
+    E2 = meta.get('E2', 1.0)
+    SE2 = meta.get('SE2', 1.0)
+
+    # Disable saturation when E1=0 (common convention)
+    if E1 == 0 or E2 == 0 or abs(E2 - E1) < 1e-10:
+        return 0.0
+
+    Efd_abs = abs(Efd)
+    if Efd_abs < 0.75 * E1:
+        return 0.0
+
+    # Quadratic saturation model: SE(E) = B * (E - A)^2 / E
+    # Solve for A, B from two data points
+    sqrt_SE1E1 = np.sqrt(SE1 * E1) if SE1 * E1 > 0 else 0.0
+    sqrt_SE2E2 = np.sqrt(SE2 * E2) if SE2 * E2 > 0 else 0.0
+
+    if abs(sqrt_SE2E2 - sqrt_SE1E1) < 1e-10:
+        return 0.0
+
+    A = (E1 * sqrt_SE2E2 - E2 * sqrt_SE1E1) / (sqrt_SE2E2 - sqrt_SE1E1)
+    B_numer = sqrt_SE1E1
+    B_denom = E1 - A
+
+    if abs(B_denom) < 1e-10:
+        return 0.0
+
+    B = (B_numer / B_denom) ** 2
+
+    if Efd_abs <= A:
+        return 0.0
+
+    return B * (Efd_abs - A) ** 2 / Efd_abs
+
+
+def exdc2_dynamics(x, ports, meta):
+    """
+    Full IEEE EXDC2 exciter dynamics.
+
+    States: [vm, vr, efd, xf]
+        vm:  Voltage measurement (filtered terminal voltage)
+        vr:  Amplifier/regulator output (with VRMAX/VRMIN limits)
+        efd: Exciter output (field voltage)
+        xf:  Rate feedback filter state
+
+    The signal path is:
+        Vt -> [TR filter] -> vm
+        Verr = Vref - vm - Vf
+        Verr -> [KA/(1+sTA)] -> vr (with VRMAX/VRMIN limits)
+        vr -> [1/(KE+SE+sTE)] -> efd
+        efd -> [sKF1/(1+sTF1)] -> Vf (rate feedback)
+
+    Args:
+        x: numpy array of 4 states [vm, vr, efd, xf]
+        ports: dict with key 'Vt' (terminal voltage)
         meta: dict of exciter parameters
 
     Returns:
         x_dot: numpy array of 4 state derivatives
     """
     # Extract states
-    vm, vr1, vr2, vf = x
+    vm, vr, efd, xf = x
 
     # Extract ports
     Vt = ports.get('Vt', 1.0)
@@ -31,6 +92,10 @@ def exdc2_dynamics(x, ports, meta):
     TR = meta['TR']
     TA = meta['TA']
     KA = meta['KA']
+    KE = meta['KE']
+    TE = meta['TE']
+    KF = meta['KF']
+    TF1 = meta['TF1']
     Vref = meta['Vref']
     VRMAX = meta['VRMAX']
     VRMIN = meta['VRMIN']
@@ -38,26 +103,30 @@ def exdc2_dynamics(x, ports, meta):
     # State derivatives
     x_dot = np.zeros(4)
 
-    # Voltage measurement dynamics
-    x_dot[0] = (Vt - vm) / TR  # d(vm)/dt
+    # 1. Voltage measurement filter
+    x_dot[0] = (Vt - vm) / TR
 
-    # Voltage error
-    Verr = Vref - vm
+    # 2. Rate feedback signal: Vf = KF/TF1 * (efd - xf)
+    Vf = KF * (efd - xf) / TF1
 
-    # Regulator dynamics with anti-windup
-    vr1_unlimited = (KA * Verr - vr1) / TA
+    # 3. Voltage error (includes rate feedback)
+    Verr = Vref - vm - Vf
 
-    # Anti-windup limiter
-    if vr1 >= VRMAX and vr1_unlimited > 0:
+    # 4. Amplifier/regulator with anti-windup limits
+    vr_unlimited = (KA * Verr - vr) / TA
+    if vr >= VRMAX and vr_unlimited > 0:
         x_dot[1] = 0.0
-    elif vr1 <= VRMIN and vr1_unlimited < 0:
+    elif vr <= VRMIN and vr_unlimited < 0:
         x_dot[1] = 0.0
     else:
-        x_dot[1] = vr1_unlimited
+        x_dot[1] = vr_unlimited
 
-    # vr2, vf not used in simplified model
-    x_dot[2] = 0.0
-    x_dot[3] = 0.0
+    # 5. Exciter with saturation
+    SE_efd = _compute_saturation(efd, meta)
+    x_dot[2] = (vr - (KE + SE_efd) * efd) / TE
+
+    # 6. Rate feedback filter state
+    x_dot[3] = (efd - xf) / TF1
 
     return x_dot
 
@@ -65,17 +134,17 @@ def exdc2_dynamics(x, ports, meta):
 def exdc2_output(x, ports, meta):
     """
     Compute exciter output Efd.
-    
+
     Args:
-        x: numpy array of states
-        ports: dict (not used for EXDC2)
+        x: numpy array of states [vm, vr, efd, xf]
+        ports: dict (not used for output)
         meta: dict of parameters
-    
+
     Returns:
-        Efd: field voltage (vr1 state)
+        Efd: field voltage (efd state, index 2)
     """
-    vm, vr1, vr2, vf = x
-    return vr1
+    vm, vr, efd, xf = x
+    return efd
 
 
 def build_exdc2_core(exc_data):
@@ -89,9 +158,9 @@ def build_exdc2_core(exc_data):
         metadata: dict with additional info
     """
     core = DynamicsCore(label=f'EXDC2_{exc_data["idx"]}', dynamics_fn=exdc2_dynamics)
-    
+
     # Extract parameters
-    TR = exc_data['TR']
+    TR = max(exc_data['TR'], 0.001)
     KA = min(exc_data['KA'], 200.0)
     TA = max(exc_data['TA'], 0.001)
     KE = exc_data['KE']
@@ -100,46 +169,46 @@ def build_exdc2_core(exc_data):
     TF1 = max(exc_data['TF1'], 0.001)
     TC = exc_data['TC']
     TB = exc_data['TB']
-    
+
     Vref = 1.0
-    
-    # States
-    vm, vr1, vr2, vf = core.symbols(['vm', 'vr1', 'vr2', 'vf'])
-    
+
+    # States: [vm, vr, efd, xf]
+    vm, vr, efd_sym, xf = core.symbols(['vm', 'vr', 'efd', 'xf'])
+
     # Parameters
     TR_sym, KA_sym, TA_sym = core.symbols(['TR_exc', 'KA_exc', 'TA_exc'])
     KE_sym, TE_sym = core.symbols(['KE_exc', 'TE_exc'])
     KF_sym, TF1_sym = core.symbols(['KF_exc', 'TF1_exc'])
     TC_sym, TB_sym = core.symbols(['TC_exc', 'TB_exc'])
     Vref_sym = core.symbols('Vref_exc')
-    
+
     # Hamiltonian
-    H_exc = (TR_sym/2)*vm**2 + (TA_sym/2)*vr1**2 + (TB_sym/2)*vr2**2 + (TF1_sym/2)*vf**2
-    
-    core.add_storages([vm, vr1, vr2, vf], H_exc)
-    
+    H_exc = (TR_sym/2)*vm**2 + (TA_sym/2)*vr**2 + (TE_sym/2)*efd_sym**2 + (TF1_sym/2)*xf**2
+
+    core.add_storages([vm, vr, efd_sym, xf], H_exc)
+
     # Dissipations
     w_vm = core.symbols('w_vm')
     z_vm = w_vm / TR_sym
-    
-    w_vr1 = core.symbols('w_vr1')
-    z_vr1 = w_vr1 / TA_sym
-    
-    w_vr2 = core.symbols('w_vr2')
-    z_vr2 = w_vr2 / TB_sym
-    
-    w_vf = core.symbols('w_vf')
-    z_vf = w_vf / TF1_sym
-    
-    core.add_dissipations([w_vm, w_vr1, w_vr2, w_vf],
-                         [z_vm, z_vr1, z_vr2, z_vf])
-    
+
+    w_vr = core.symbols('w_vr')
+    z_vr = w_vr / TA_sym
+
+    w_efd = core.symbols('w_efd')
+    z_efd = w_efd / TE_sym
+
+    w_xf = core.symbols('w_xf')
+    z_xf = w_xf / TF1_sym
+
+    core.add_dissipations([w_vm, w_vr, w_efd, w_xf],
+                         [z_vm, z_vr, z_efd, z_xf])
+
     # Ports: Input [Vt_in], Output [Efd_out]
     Vt_in = core.symbols('Vt_in')
     Efd_out = core.symbols('Efd_out')
-    
+
     core.add_ports([Vt_in], [Efd_out])
-    
+
     # Parameter substitutions
     core.subs.update({
         TR_sym: TR,
@@ -153,7 +222,7 @@ def build_exdc2_core(exc_data):
         TB_sym: TB,
         Vref_sym: Vref
     })
-    
+
     # Metadata
     metadata = {
         'idx': exc_data['idx'],
@@ -178,7 +247,7 @@ def build_exdc2_core(exc_data):
 
     # Set metadata on core for dynamics computation
     core.set_metadata(metadata)
-    
+
     # Set component interface attributes
     core.n_states = 4
     core.output_fn = exdc2_output

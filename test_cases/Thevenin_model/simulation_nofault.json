@@ -1,5 +1,9 @@
 {
   "description": "No-fault simulation configuration for Thevenin SMIB system",
+  "initialization": {
+    "run_power_flow": true,
+    "power_flow_verbose": true
+  },
   "time": {
     "t_end": 15.0,
     "n_points": 3000
