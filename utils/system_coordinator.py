@@ -21,12 +21,13 @@ class PowerSystemCoordinator:
         # Build mappings from JSON data
         self._build_bus_mapping()
         self._build_generator_mapping()
+        self._build_grid_mapping()
         self._build_load_mapping()
 
         # Build network infrastructure from Line data
         self._build_ybus()
 
-        # Build reduced network for generator buses
+        # Build reduced network for generator buses (considering grid as boundary)
         self._build_reduced_network()
 
     def _build_bus_mapping(self):
@@ -67,6 +68,52 @@ class PowerSystemCoordinator:
         # Unique generator bus indices (some buses may have multiple generators)
         self.unique_gen_buses = sorted(set(self.gen_bus_internal))
         self.n_gen_bus = len(self.unique_gen_buses)
+
+    def _build_grid_mapping(self):
+        """Build grid/slack bus mapping from Slack data
+        
+        IMPORTANT: Only treat Slack as a grid voltage source if it has NO generator!
+        If a Slack bus has a generator attached, it's just a power flow reference, not a grid.
+        """
+        slack_buses = self.system_data.get('Slack', [])
+        
+        # Map grid index to bus (only for TRUE grids without generators)
+        self.grid_to_bus = {}
+        self.bus_to_grids = {}
+        
+        grid_idx = 0
+        for i, slack in enumerate(slack_buses):
+            bus_idx = slack['bus']
+            
+            # Check if this bus has a generator - if yes, it's NOT a true grid
+            has_generator = bus_idx in self.bus_to_gens
+            
+            if not has_generator:
+                # This is a TRUE grid/infinite bus (no generator)
+                self.grid_to_bus[grid_idx] = bus_idx
+                
+                if bus_idx not in self.bus_to_grids:
+                    self.bus_to_grids[bus_idx] = []
+                self.bus_to_grids[bus_idx].append(grid_idx)
+                
+                print(f"  Slack bus {bus_idx}: TRUE GRID (no generator attached)")
+                grid_idx += 1
+            else:
+                # This slack is just a power flow reference (has a generator)
+                print(f"  Slack bus {bus_idx}: Reference generator (not a grid)")
+        
+        # Get grid bus internal indices (only true grids)
+        self.grid_bus_internal = [self.bus_idx_to_internal[self.grid_to_bus[i]]
+                                   for i in range(len(self.grid_to_bus))]
+        
+        # Unique grid bus indices
+        self.unique_grid_buses = sorted(set(self.grid_bus_internal))
+        self.n_grid_bus = len(self.unique_grid_buses)
+        
+        if self.n_grid_bus > 0:
+            print(f"  Grid voltage sources: {self.n_grid_bus} buses at internal indices {self.unique_grid_buses}")
+        else:
+            print(f"  No grid voltage sources (multi-machine system)")
 
     def _build_load_mapping(self):
         """Build load data from PQ data"""
@@ -131,25 +178,30 @@ class PowerSystemCoordinator:
     def _build_reduced_network(self):
         """
         Build reduced network using Kron reduction.
-        Eliminates non-generator buses to get equivalent Y between generators.
+        Keeps generator AND grid buses as active nodes.
+        Eliminates load/non-active buses.
         """
-        # Identify generator and non-generator (load) buses
-        gen_buses = self.unique_gen_buses
-        load_buses = [i for i in range(self.n_bus) if i not in gen_buses]
+        # Identify active buses (generators + grids) and load buses
+        active_buses = sorted(set(self.unique_gen_buses + self.unique_grid_buses))
+        load_buses = [i for i in range(self.n_bus) if i not in active_buses]
 
-        n_g = len(gen_buses)
+        n_a = len(active_buses)
         n_l = len(load_buses)
+        
+        print(f"  Network reduction: {n_a} active buses (gen+grid), {n_l} load buses")
 
         if n_l == 0:
             # No load buses, reduced = full
-            self.Ybus_reduced = self.Ybus_base[np.ix_(gen_buses, gen_buses)].copy()
-            self.gen_bus_to_reduced = {gb: i for i, gb in enumerate(gen_buses)}
+            self.Ybus_reduced = self.Ybus_base[np.ix_(active_buses, active_buses)].copy()
+            self.active_bus_to_reduced = {ab: i for i, ab in enumerate(active_buses)}
+            self.gen_bus_to_reduced = {gb: active_buses.index(gb) for gb in self.unique_gen_buses}
+            self.grid_bus_to_reduced = {gb: active_buses.index(gb) for gb in self.unique_grid_buses}
             return
 
-        # Partition Ybus: [Ygg Ygl; Ylg Yll]
-        Ygg = self.Ybus_base[np.ix_(gen_buses, gen_buses)]
-        Ygl = self.Ybus_base[np.ix_(gen_buses, load_buses)]
-        Ylg = self.Ybus_base[np.ix_(load_buses, gen_buses)]
+        # Partition Ybus: [Yaa Yal; Yla Yll] where 'a' = active, 'l' = load
+        Yaa = self.Ybus_base[np.ix_(active_buses, active_buses)]
+        Yal = self.Ybus_base[np.ix_(active_buses, load_buses)]
+        Yla = self.Ybus_base[np.ix_(load_buses, active_buses)]
         Yll = self.Ybus_base[np.ix_(load_buses, load_buses)]
 
         # Add load admittances to Yll (constant impedance load model)
@@ -162,17 +214,19 @@ class PowerSystemCoordinator:
                 Y_load = np.conj(S)  # Y = S* / |V|^2, assume |V|=1
                 Yll[i, i] += Y_load
 
-        # Kron reduction: Y_reduced = Ygg - Ygl * inv(Yll) * Ylg
+        # Kron reduction: Y_reduced = Yaa - Yal * inv(Yll) * Yla
         try:
             Yll_inv = np.linalg.inv(Yll)
-            self.Ybus_reduced = Ygg - Ygl @ Yll_inv @ Ylg
+            self.Ybus_reduced = Yaa - Yal @ Yll_inv @ Yla
         except np.linalg.LinAlgError:
             # If Yll is singular, use pseudo-inverse
             Yll_inv = np.linalg.pinv(Yll)
-            self.Ybus_reduced = Ygg - Ygl @ Yll_inv @ Ylg
+            self.Ybus_reduced = Yaa - Yal @ Yll_inv @ Yla
 
-        # Mapping from gen bus internal index to reduced matrix index
-        self.gen_bus_to_reduced = {gb: i for i, gb in enumerate(gen_buses)}
+        # Mapping from bus internal index to reduced matrix index
+        self.active_bus_to_reduced = {ab: i for i, ab in enumerate(active_buses)}
+        self.gen_bus_to_reduced = {gb: active_buses.index(gb) for gb in self.unique_gen_buses}
+        self.grid_bus_to_reduced = {gb: active_buses.index(gb) for gb in self.unique_grid_buses}
 
     def apply_fault(self, bus_idx, impedance):
         """
@@ -228,18 +282,20 @@ class PowerSystemCoordinator:
             Yll_inv = np.linalg.pinv(Yll)
             return Ygg - Ygl @ Yll_inv @ Ylg
 
-    def solve_network(self, gen_states, Ybus=None, use_fault=False, fault_bus=None, fault_impedance=None):
+    def solve_network(self, gen_states, grid_voltages=None, Ybus=None, use_fault=False, fault_bus=None, fault_impedance=None):
         """
         Solve network with Park transformations using FULL network.
 
-        Uses current-balance approach:
+        Uses current-balance approach with grid voltage boundaries:
         1. Compute E'' from generator states
-        2. Inject current at generator buses into full network
-        3. Solve for all bus voltages
-        4. Extract generator terminal voltages and currents
+        2. Fix grid bus voltages (known boundary conditions)
+        3. Inject current at generator buses into full network
+        4. Solve for non-grid bus voltages
+        5. Extract generator terminal voltages and currents
 
         Args:
             gen_states: Generator states (n_gen x n_states_per_gen)
+            grid_voltages: Complex voltage phasors for grid buses (n_grid,) - if None, no grid
             Ybus: If provided, use this Ybus (for backward compatibility)
             use_fault: If True, apply fault
             fault_bus: Bus index for fault
@@ -318,10 +374,20 @@ class PowerSystemCoordinator:
             gen_bus = self.gen_bus_internal[i]
             I_inj[gen_bus] += y_gen_internal[i] * E_sys[i]
 
-        # Iterative solution with constant power loads
-        # Start with flat voltage profile
+        # Initialize voltage profile
         V_bus = np.ones(self.n_bus, dtype=complex)
+        
+        # Set grid bus voltages if provided (boundary conditions)
+        grid_bus_indices = []
+        if grid_voltages is not None and len(grid_voltages) > 0:
+            for i, grid_bus_internal in enumerate(self.grid_bus_internal):
+                V_bus[grid_bus_internal] = grid_voltages[i]
+                grid_bus_indices.append(grid_bus_internal)
+        
+        # Identify which buses to solve for (non-grid buses)
+        solve_buses = [i for i in range(self.n_bus) if i not in grid_bus_indices]
 
+        # Iterative solution with constant power loads
         for iteration in range(10):
             # Calculate load current injection (constant power model)
             # I_load = (S/V)* = S* / V*
@@ -337,14 +403,40 @@ class PowerSystemCoordinator:
             # Total current: generator injection minus load
             I_total = I_inj - I_load
 
-            # Solve for bus voltages
-            try:
-                V_bus_new = np.linalg.solve(Y_aug, I_total)
-            except np.linalg.LinAlgError:
-                break
+            # If we have grid buses, solve only for non-grid buses
+            if len(grid_bus_indices) > 0:
+                # Modify equation to account for known grid voltages
+                # Y * V = I becomes:
+                # Y_uu * V_u + Y_ug * V_g = I_u  (solve for V_u)
+                # where u = unknown (non-grid), g = grid (known)
+                
+                Y_uu = Y_aug[np.ix_(solve_buses, solve_buses)]
+                Y_ug = Y_aug[np.ix_(solve_buses, grid_bus_indices)]
+                I_u = I_total[solve_buses]
+                V_g = V_bus[grid_bus_indices]
+                
+                # Solve: Y_uu * V_u = I_u - Y_ug * V_g
+                try:
+                    V_u_new = np.linalg.solve(Y_uu, I_u - Y_ug @ V_g)
+                    V_bus_new = V_bus.copy()
+                    V_bus_new[solve_buses] = V_u_new
+                    # Grid voltages remain fixed
+                except np.linalg.LinAlgError:
+                    break
+            else:
+                # No grid buses, solve for all
+                try:
+                    V_bus_new = np.linalg.solve(Y_aug, I_total)
+                except np.linalg.LinAlgError:
+                    break
 
-            # Check convergence
-            if np.max(np.abs(V_bus_new - V_bus)) < 1e-6:
+            # Check convergence (only for non-grid buses)
+            if len(solve_buses) > 0:
+                conv_check = np.max(np.abs(V_bus_new[solve_buses] - V_bus[solve_buses]))
+            else:
+                conv_check = 0.0
+                
+            if conv_check < 1e-6:
                 V_bus = V_bus_new
                 break
             V_bus = V_bus_new

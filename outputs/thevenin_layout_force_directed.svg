@@ -1,0 +1,58 @@
+<svg width="1400" height="800" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+<polygon points="0 0, 10 3.5, 0 7" fill="#666"/>
+</marker>
+</defs>
+<rect width="100%" height="100%" fill="#fafafa"/>
+<text x="50" y="35" font-family="Arial" font-size="20" font-weight="bold" fill="#1a237e">Auto-Layout Power System Visualization (force_directed)</text>
+<text x="50" y="55" font-family="Arial" font-size="12" fill="#666">Positions computed from electrical distances (impedance-based)</text>
+<rect x="50" y="730" width="1300" height="55" fill="#f5f5f5" stroke="#bdbdbd" rx="5"/>
+<text x="70" y="750" font-family="Arial" font-size="12" font-weight="bold">Legend:</text>
+<circle cx="170" cy="755" r="12" fill="#e3f2fd" stroke="#1976d2" stroke-width="2"/>
+<text x="165" y="760" font-family="Arial" font-size="10" font-weight="bold" fill="#1976d2">G</text>
+<text x="190" y="760" font-family="Arial" font-size="11">Generator</text>
+<rect x="270" y="745" width="20" height="20" fill="#fff3e0" stroke="#ff6f00" stroke-width="2" rx="3"/>
+<text x="300" y="760" font-family="Arial" font-size="11">Exciter</text>
+<rect x="380" y="745" width="20" height="20" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2" rx="3"/>
+<text x="410" y="760" font-family="Arial" font-size="11">Governor</text>
+<circle cx="510" cy="750" r="8" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2"/>
+<circle cx="520" cy="760" r="8" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2"/>
+<text x="540" y="760" font-family="Arial" font-size="11">Transformer</text>
+<line x1="640" y1="755" x2="690" y2="755" stroke="#424242" stroke-width="3"/>
+<text x="700" y="760" font-family="Arial" font-size="11">Transmission Line</text>
+<rect x="830" y="742" width="8" height="26" fill="#212121" rx="2"/>
+<text x="850" y="760" font-family="Arial" font-size="11">Bus</text>
+<polygon points="920,765 935,745 950,765" fill="#ffebee" stroke="#d32f2f" stroke-width="2"/>
+<text x="960" y="760" font-family="Arial" font-size="11">Load</text>
+<line x1="1242.7" y1="287.8" x2="150.0" y2="200.0" stroke="#424242" stroke-width="2"/>
+<text x="696.4" y="235.9" font-family="Arial" font-size="9" fill="#616161" text-anchor="middle" transform="rotate(4.6 696.4 235.9)">X=0.059</text>
+<line x1="169.3" y1="599.2" x2="691.6" y2="447.7" stroke="#7b1fa2" stroke-width="3"/>
+<line x1="720.4" y1="439.3" x2="1242.7" y2="287.8" stroke="#7b1fa2" stroke-width="3"/>
+<circle cx="698.3" cy="445.8" r="10" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2"/>
+<circle cx="713.7" cy="441.3" r="10" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2"/>
+<text x="706.0" y="468.5" font-family="Arial" font-size="8" fill="#7b1fa2" text-anchor="middle">X=0.20912</text>
+<line x1="169.3" y1="599.2" x2="99.3" y2="599.2" stroke="#1976d2" stroke-width="2"/>
+<circle cx="99.3" cy="599.2" r="20" fill="#e3f2fd" stroke="#1976d2" stroke-width="3"/>
+<text x="99.3" y="604.2" font-family="Arial" font-size="12" font-weight="bold" fill="#1976d2" text-anchor="middle">G1</text>
+<text x="69.3" y="591.2" font-family="Arial" font-size="8" fill="#1565c0" text-anchor="middle">M=6.96</text>
+<text x="69.3" y="602.2" font-family="Arial" font-size="8" fill="#1565c0" text-anchor="middle">100MVA</text>
+<line x1="99.3" y1="579.2" x2="99.3" y2="564.2" stroke="#ff6f00" stroke-width="1.5" stroke-dasharray="3,2"/>
+<rect x="87.3" y="544.2" width="24" height="20" fill="#fff3e0" stroke="#ff6f00" stroke-width="2" rx="3"/>
+<text x="99.3" y="558.2" font-family="Arial" font-size="8" font-weight="bold" fill="#e65100" text-anchor="middle">AVR</text>
+<line x1="99.3" y1="619.2" x2="99.3" y2="634.2" stroke="#2e7d32" stroke-width="1.5" stroke-dasharray="3,2"/>
+<rect x="87.3" y="634.2" width="24" height="20" fill="#e8f5e9" stroke="#2e7d32" stroke-width="2" rx="3"/>
+<text x="99.3" y="648.2" font-family="Arial" font-size="8" font-weight="bold" fill="#1b5e20" text-anchor="middle">GOV</text>
+<line x1="169.3" y1="599.2" x2="169.3" y2="632.2" stroke="#d32f2f" stroke-width="2"/>
+<polygon points="169.3,656.2 157.3,636.2 181.3,636.2" fill="#ffebee" stroke="#d32f2f" stroke-width="2"/>
+<text x="169.3" y="669.2" font-family="Arial" font-size="8" fill="#c62828" text-anchor="middle">P=0.217</text>
+<rect x="165.3" y="574.2" width="8" height="50" fill="#1565c0" rx="2"/>
+<text x="169.3" y="567.2" font-family="Arial" font-size="11" font-weight="bold" text-anchor="middle">Gen_Bus_20kV</text>
+<text x="169.3" y="639.2" font-family="Arial" font-size="9" fill="#757575" text-anchor="middle">20kV</text>
+<rect x="1238.7" y="262.8" width="8" height="50" fill="#212121" rx="2"/>
+<text x="1242.7" y="255.8" font-family="Arial" font-size="11" font-weight="bold" text-anchor="middle">HV_Bus_345kV</text>
+<text x="1242.7" y="327.8" font-family="Arial" font-size="9" fill="#757575" text-anchor="middle">345kV</text>
+<rect x="146.0" y="175.0" width="8" height="50" fill="#212121" rx="2"/>
+<text x="150.0" y="168.0" font-family="Arial" font-size="11" font-weight="bold" text-anchor="middle">Grid_Bus_345kV</text>
+<text x="150.0" y="240.0" font-family="Arial" font-size="9" fill="#757575" text-anchor="middle">345kV</text>
+</svg>

@@ -1,0 +1,29 @@
+{
+  "description": "Fault simulation configuration for Thevenin SMIB system",
+  "time": {
+    "t_end": 15.0,
+    "n_points": 3000
+  },
+  "fault": {
+    "enabled": true,
+    "bus": 2,
+    "impedance_real": 0.0,
+    "impedance_imag": 0.005,
+    "start_time": 1.0,
+    "duration": 0.1
+  },
+  "solver": {
+    "method": "Radau",
+    "rtol": 1e-6,
+    "atol": 1e-8
+  },
+  "initialization": {
+    "run_power_flow": false,
+    "power_flow_verbose": true
+  },
+  "output": {
+    "directory": "outputs",
+    "save_states": true,
+    "plot_format": "png"
+  }
+}

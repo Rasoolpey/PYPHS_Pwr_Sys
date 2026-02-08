@@ -88,6 +88,12 @@ class DynamicsCore(Core):
 
     Each component provides its own dynamics function that computes
     state derivatives given current states and port values.
+    
+    Attributes:
+        n_states: Number of states (set by component builder)
+        output_fn: Function to compute outputs from states (set by component builder)
+        component_type: Type identifier (e.g., "generator", "exciter")
+        model_name: Model name (e.g., "GENROU", "ESST3A")
     """
 
     def __init__(self, label='system', dynamics_fn=None):
@@ -101,6 +107,12 @@ class DynamicsCore(Core):
         super().__init__(label)
         self._dynamics_fn = dynamics_fn
         self._metadata = {}
+        
+        # Component interface attributes (set by builder functions)
+        self.n_states = 0
+        self.output_fn = None
+        self.component_type = None
+        self.model_name = None
 
     def set_dynamics(self, dynamics_fn):
         """Set the dynamics function after construction"""

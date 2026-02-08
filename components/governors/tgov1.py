@@ -158,5 +158,11 @@ def build_tgov1_core(gov_data, S_machine=900.0, S_system=100.0):
 
     # Set metadata on core for dynamics computation
     core.set_metadata(metadata)
+    
+    # Set component interface attributes
+    core.n_states = 2
+    core.output_fn = tgov1_output
+    core.component_type = "governor"
+    core.model_name = "TGOV1"
 
     return core, metadata

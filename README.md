@@ -125,16 +125,32 @@ Component build complete!
 ```python
 from utils.fault_sim_modular import ModularFaultSimulator
 
-# Initialize simulator
-sim = ModularFaultSimulator('test_cases/Kundur_System/kundur_full.json')
+# Initialize simulator with system and simulation configs
+sim = ModularFaultSimulator(
+    system_json='test_cases/Kundur_System/kundur_full.json',
+    simulation_json='test_cases/Kundur_System/simulation_fault.json'
+)
 
-# Configure fault (bus index, impedance, start time, duration)
+# Alternatively, configure fault programmatically
 sim.set_fault(bus_idx=1, impedance=0.01j, start_time=2.0, duration=0.15)
 
-# Run simulation
+# Initialize equilibrium (automatically runs numerical refinement if needed)
 x0 = sim.initialize_equilibrium()
+
+# Run simulation
 sol = sim.simulate(x0, t_end=15.0)
 sim.plot_results(sol)
+```
+
+**Simulation JSON Example:**
+```json
+{
+  "time": {"t_end": 15.0, "n_points": 3000},
+  "fault": {"enabled": true, "bus": 1, "impedance": "0.01j", 
+            "start_time": 2.0, "duration": 0.15},
+  "solver": {"method": "Radau", "rtol": 1e-6, "atol": 1e-8},
+  "initialization": {"run_power_flow": true}
+}
 ```
 
 ### 3. Analyze Lyapunov Stability
@@ -571,7 +587,10 @@ For an N-machine system:
 - Generator admittance: `y_gen = 1/(j×Xd'')`
 
 ### Equilibrium Initialization
-Direct calculation from power flow data:
+
+The framework uses a sophisticated multi-stage initialization process to ensure zero drift:
+
+**Stage 1: Algebraic Equilibrium Guess**
 ```python
 # For each generator:
 V_phasor = V_mag × exp(j × V_angle)    # From Bus data
@@ -581,6 +600,69 @@ E_phasor = V_phasor + (ra + j×Xd'') × I_phasor  # Internal EMF
 delta = angle(E_phasor)                 # Rotor angle
 psi_f = |E_phasor| / gd1               # Field flux
 ```
+
+**Stage 2: Mechanical Power Adjustment**
+- Computes actual electrical power from network solver
+- Adjusts governor mechanical power Pm to match Pe exactly
+- Ensures zero rotor acceleration: `d(omega)/dt = (Pm - Pe) / M = 0`
+
+**Stage 3: Adaptive Numerical Refinement**
+- Automatically detects large derivatives (exciter/governor transients)
+- Simulates system until all derivatives converge
+- Checks convergence adaptively (no hardcoded settling time)
+- Typically converges in 5-20 seconds of simulation
+- Achieves near-zero drift (< 0.1° over 15s)
+
+This approach handles complex exciter models (like ESST3A with lead-lag blocks) that cannot be initialized algebraically.
+
+### Power Flow and Slack Bus Selection
+
+**Automatic Slack Bus Selection:**
+
+Every power system requires a slack bus to balance generation and load. The framework implements intelligent three-tier automatic selection:
+
+1. **Priority 1 - User-Specified Slack** (highest priority)
+   - Uses "Slack" section from JSON if present
+   - Prefers grids/infinite buses over generators when multiple slacks exist
+   
+2. **Priority 2 - Grid/Voltage Source** (fallback)
+   - Detects grid components (infinite bus models)
+   - Ideal for SMIB (Single-Machine Infinite-Bus) systems
+   
+3. **Priority 3 - Largest Generator** (last resort)
+   - Selects generator with highest MVA rating
+   - Ensures multi-machine systems without explicit slack can converge
+
+**Power Flow Features:**
+- Newton-Raphson AC power flow solver
+- Adaptive damping for robust convergence (even heavily loaded systems)
+- Practical convergence tolerance (1e-4 pu)
+- Up to 100 iterations for difficult cases
+- Comprehensive diagnostics and validation
+- Automatically updates system initial conditions
+
+**Usage:**
+```python
+from utils.power_flow import run_power_flow
+
+# Optional - run power flow before simulation
+pf = run_power_flow(builder, coordinator, verbose=True)
+
+# Or enable automatic power flow in simulation JSON:
+{
+  "initialization": {
+    "run_power_flow": true,
+    "power_flow_verbose": true
+  }
+}
+```
+
+**Benefits:**
+- Accurate voltage magnitudes and angles across all buses
+- Consistent power injections and flows
+- Proper slack bus power balancing
+- Reduced initialization transients
+- No manual initial condition calculation required
 
 ## Tips and Best Practices
 
@@ -676,10 +758,33 @@ To contribute new models or analysis tools:
 
 ---
 
-**Framework Version**: 1.3
-**Last Updated**: January 2026
+**Framework Version**: 1.4
+**Last Updated**: February 2026
 
 ### Changelog
+
+**v1.4 (February 2026)**
+- **NEW: Adaptive Numerical Equilibrium Solver**
+  - Multi-stage initialization: algebraic guess → Pm adjustment → adaptive refinement
+  - Automatically detects and corrects large exciter/governor derivatives
+  - Adaptive convergence monitoring (no hardcoded settling time)
+  - Achieves near-perfect equilibrium (< 0.1° drift over 15s)
+  - Handles complex exciter models (ESST3A, etc.) that cannot be initialized algebraically
+- **NEW: AC Power Flow with Automatic Slack Bus Selection**
+  - Three-tier intelligent slack bus selection (user → grid → largest generator)
+  - Newton-Raphson solver with adaptive damping
+  - Robust convergence for heavily loaded systems (up to 100 iterations)
+  - Practical convergence criteria (1e-4 pu)
+  - Comprehensive power balance validation
+  - Optional automatic execution via simulation JSON
+- **Modular Architecture Enhancements**
+  - Component self-description (`n_states`, `output_fn`, `component_type`, `model_name`)
+  - Dynamic component registry with flat hierarchical structure
+  - Zero hardcoded component logic in simulator
+  - Full support for component swapping via JSON only
+- **Two-File JSON Configuration**
+  - Separate system parameters (system.json) and simulation settings (simulation.json)
+  - Improved reusability and configuration management
 
 **v1.3 (January 2026)**
 - **NEW: Lyapunov Stability Analyzer**

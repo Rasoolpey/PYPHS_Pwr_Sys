@@ -36,6 +36,23 @@ def genrou_dynamics(x, ports, meta):
     Td10 = meta['Td10']
     Td20 = meta['Td20']
     Tq20 = meta['Tq20']
+    
+    # Get field inductance scaling factor for proper Efd per-unit base
+    # Efd from exciter is on field voltage base (≈1 pu at rated conditions)
+    # psi_f is field flux on stator base (can be 5-6 pu at rated conditions)
+    # The scaling factor converts between these bases
+    xd = meta.get('xd', 1.8)
+    xl = meta.get('xl', 0.15)
+    xd1 = meta.get('xd1', 0.6)
+    Xad = xd - xl
+    
+    # Calculate field inductance Lf
+    Xfl = (Xad * (xd1 - xl)) / (Xad - (xd1 - xl))
+    Lf = Xad + Xfl
+    
+    # Scaling factor: Use Lf*2 for typical exciter per-unit base
+    # This gives Efd ≈ 1.2-1.5 pu at rated conditions
+    Kfd_scale = Lf * 2.0
 
     # Rotor speed from momentum
     omega = p / M
@@ -55,7 +72,11 @@ def genrou_dynamics(x, ports, meta):
     x_dot[3] = Vq - ra * Iq - omega_b * omega * psi_d  # d(psi_q)/dt
 
     # Rotor flux dynamics
-    x_dot[4] = (Efd - psi_f) / Td10  # d(psi_f)/dt - field winding
+    # Efd from exciter is on field voltage base (≈1 pu at rated conditions)
+    # psi_f is the field flux linkage on stator base
+    # Convert Efd to stator base: Efd_stator = Efd * Kfd_scale
+    # At equilibrium: Efd (exciter pu) = psi_f / Kfd_scale
+    x_dot[4] = (Efd * Kfd_scale - psi_f) / Td10  # d(psi_f)/dt - field winding
     x_dot[5] = -psi_kd / Td20  # d(psi_kd)/dt - d-axis damper
     x_dot[6] = -psi_kq / Tq20  # d(psi_kq)/dt - q-axis damper
 
@@ -205,5 +226,11 @@ def build_genrou_core(gen_data, S_system=100.0):
 
     # Set metadata on core for dynamics computation
     core.set_metadata(metadata)
+    
+    # Set component interface attributes
+    core.n_states = 7
+    core.output_fn = None  # GENROU outputs are currents, computed in network solution
+    core.component_type = "generator"
+    core.model_name = "GENROU"
 
     return core, metadata

@@ -62,6 +62,22 @@ def exdc2_dynamics(x, ports, meta):
     return x_dot
 
 
+def exdc2_output(x, ports, meta):
+    """
+    Compute exciter output Efd.
+    
+    Args:
+        x: numpy array of states
+        ports: dict (not used for EXDC2)
+        meta: dict of parameters
+    
+    Returns:
+        Efd: field voltage (vr1 state)
+    """
+    vm, vr1, vr2, vf = x
+    return vr1
+
+
 def build_exdc2_core(exc_data):
     """Build EXDC2 exciter as DynamicsCore
 
@@ -162,5 +178,11 @@ def build_exdc2_core(exc_data):
 
     # Set metadata on core for dynamics computation
     core.set_metadata(metadata)
+    
+    # Set component interface attributes
+    core.n_states = 4
+    core.output_fn = exdc2_output
+    core.component_type = "exciter"
+    core.model_name = "EXDC2"
 
     return core, metadata
