@@ -7,3 +7,4 @@ components/Andes/
 
 # Ignore test case results
 test_cases/ieee14
+test_cases/ieee39
