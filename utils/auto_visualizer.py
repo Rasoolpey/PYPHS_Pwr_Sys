@@ -523,7 +523,9 @@ class AutoPHSVisualizer:
                                               x + bar_width / 2, y + bar_height / 2))
 
     def draw_graphviz(self, filename="power_system_graphviz", layout_engine="dot", 
-                     format="svg", show_impedance=True, show_voltage=True):
+                     format="svg", show_impedance=True, show_voltage=True, 
+                     load_scale=1.0, generator_scale=1.0, transformer_scale=1.0,
+                     exciter_scale=1.0, governor_scale=1.0):
         """
         Generate professional graph visualization using Graphviz (same as VS Code Debug Visualizer).
         
@@ -542,12 +544,19 @@ class AutoPHSVisualizer:
             format: Output format ("svg", "png", "pdf")
             show_impedance: Show impedance values on lines
             show_voltage: Show voltage levels on buses
+            load_scale: Scale factor for load triangles (default=1.0)
+            generator_scale: Scale factor for generator ellipses (default=1.0)
+            transformer_scale: Scale factor for transformer diamonds (default=1.0)
+            exciter_scale: Scale factor for exciter boxes (default=1.0)
+            governor_scale: Scale factor for governor boxes (default=1.0)
         """
         if not GRAPHVIZ_AVAILABLE:
             print("[ERROR] Graphviz not available. Install with: pip install graphviz")
             return
         
         print(f"\n[GRAPHVIZ] Using {layout_engine} layout engine (professional automatic layout)...")
+        print(f"[SCALE] Load: {load_scale}x | Generator: {generator_scale}x | Transformer: {transformer_scale}x")
+        print(f"[SCALE] Exciter: {exciter_scale}x | Governor: {governor_scale}x")
         
         # Build structure
         phs_map = self.build_phs_structure()
@@ -605,7 +614,7 @@ class AutoPHSVisualizer:
                 penwidth='2.5'
             )
         
-        # Add generators as separate nodes connected to buses
+        # Add generators as separate nodes connected to buses (REDUCED SIZE)
         for gp in phs_map["storage_ports"]:
             gen_id = gp["id"]
             bus_idx = gp["at_bus"]
@@ -619,16 +628,18 @@ class AutoPHSVisualizer:
                 style='filled',
                 fillcolor='#e3f2fd',
                 color='#1976d2',
-                penwidth='2.5',
-                width='1.2',
-                height='0.8'
+                penwidth='1.5',
+                width=f'{0.6 * generator_scale:.2f}',
+                height=f'{0.5 * generator_scale:.2f}',
+                fixedsize='true',
+                fontsize='9'
             )
             
             graph.edge(
                 str(bus_idx),
                 f"gen_{gen_id}",
                 color='#1976d2',
-                penwidth='2.0'
+                penwidth='1.5'
             )
         
         # Add exciters as small nodes
@@ -644,9 +655,11 @@ class AutoPHSVisualizer:
                 style='filled,rounded',
                 fillcolor='#fff3e0',
                 color='#ff6f00',
-                penwidth='2.0',
-                width='0.8',
-                height='0.4'
+                penwidth='1.5',
+                width=f'{0.5 * exciter_scale:.2f}',
+                height=f'{0.3 * exciter_scale:.2f}',
+                fixedsize='true',
+                fontsize='8'
             )
             
             graph.edge(
@@ -670,9 +683,11 @@ class AutoPHSVisualizer:
                 style='filled,rounded',
                 fillcolor='#e8f5e9',
                 color='#2e7d32',
-                penwidth='2.0',
-                width='0.8',
-                height='0.4'
+                penwidth='1.5',
+                width=f'{0.5 * governor_scale:.2f}',
+                height=f'{0.3 * governor_scale:.2f}',
+                fixedsize='true',
+                fontsize='8'
             )
             
             graph.edge(
@@ -683,12 +698,12 @@ class AutoPHSVisualizer:
                 penwidth='1.5'
             )
         
-        # Add loads as triangle nodes
+        # Add loads as triangle nodes (MUCH SMALLER SIZE)
         for lp in phs_map["load_ports"]:
             load_id = lp["id"]
             bus_idx = lp["at_bus"]
             
-            label = f"Load\\nP={lp['p0']:.2f}\\nQ={lp['q0']:.2f}"
+            label = f"L\\n{lp['p0']:.1f}"
             
             graph.node(
                 f"load_{load_id}",
@@ -697,16 +712,18 @@ class AutoPHSVisualizer:
                 style='filled',
                 fillcolor='#ffebee',
                 color='#d32f2f',
-                penwidth='2.0',
-                width='1.0',
-                height='0.8'
+                penwidth='1.0',
+                width=f'{0.25 * load_scale:.2f}',
+                height=f'{0.25 * load_scale:.2f}',
+                fixedsize='true',
+                fontsize='8'
             )
             
             graph.edge(
                 str(bus_idx),
                 f"load_{load_id}",
                 color='#d32f2f',
-                penwidth='2.0'
+                penwidth='1.0'
             )
         
         # Add transmission lines (coupling ports)
@@ -729,21 +746,45 @@ class AutoPHSVisualizer:
                 style='solid'
             )
         
-        # Add transformers (scaling ports)
-        for sp in phs_map["scaling_ports"]:
+        # Add transformers (scaling ports) - WITH VISIBLE DIAMOND NODES
+        for idx, sp in enumerate(phs_map["scaling_ports"]):
             b1, b2 = sp["buses"]
+            xfmr_id = f"xfmr_{idx}"
             
-            label = ""
+            # Create transformer node (diamond/square)
+            label = f"T\\n{sp['Vn1']:.0f}/{sp['Vn2']:.0f}"
             if show_impedance:
-                label = f"X={sp['x']:.4f}\\n{sp['Vn1']:.0f}→{sp['Vn2']:.0f}kV"
+                label = f"T\\n{sp['Vn1']:.0f}/\\n{sp['Vn2']:.0f}\\nX={sp['x']:.3f}"
             
+            graph.node(
+                xfmr_id,
+                label=label,
+                shape='diamond',
+                style='filled',
+                fillcolor='#f3e5f5',
+                color='#7b1fa2',
+                penwidth='2.5',
+                width=f'{0.5 * transformer_scale:.2f}',
+                height=f'{0.5 * transformer_scale:.2f}',
+                fixedsize='true',
+                fontsize='8',
+                fontcolor='#4a148c'
+            )
+            
+            # Connect bus1 -> transformer
             graph.edge(
                 str(b1),
-                str(b2),
-                label=label,
+                xfmr_id,
                 color='#7b1fa2',
-                penwidth='3.0',
-                style='dashed'
+                penwidth='2.5'
+            )
+            
+            # Connect transformer -> bus2
+            graph.edge(
+                xfmr_id,
+                str(b2),
+                color='#7b1fa2',
+                penwidth='2.5'
             )
         
         # Render the graph
