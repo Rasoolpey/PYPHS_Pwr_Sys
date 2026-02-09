@@ -98,29 +98,29 @@ def run_auto_visualization(load_scale=1.0, generator_scale=1.0, transformer_scal
         #     if output:
         #         generated_files.append(output)
 
-        # # COMMENTED OUT: Original manual SVG generation (not accurate)
+        # # COMMENTED OUT: Manual SVG generation (hierarchical/force-directed layouts)
         # print("\n" + "-"*50)
-        # print("Generating MANUAL SVG layouts (original approach)...")
+        # print("Generating MANUAL SVG layouts with colored busbars...")
         # print("-"*50)
         # 
         # print("\n[MANUAL] Hierarchical layout...")
-        # viz.draw("outputs/manual_hierarchical.svg", layout_method="hierarchical", 
+        # viz.draw("outputs/kundur_manual_hierarchical.svg", layout_method="hierarchical", 
         #         spacing_factor=2.0, strict_component_clearance=True)
-        # generated_files.append("outputs/manual_hierarchical.svg")
+        # generated_files.append("outputs/kundur_manual_hierarchical.svg")
         # 
         # print("\n[MANUAL] Force-directed layout...")
-        # viz.draw("outputs/manual_force_directed.svg", layout_method="force_directed",
+        # viz.draw("outputs/kundur_manual_force_directed.svg", layout_method="force_directed",
         #         spacing_factor=2.0, strict_component_clearance=True)
-        # generated_files.append("outputs/manual_force_directed.svg")
+        # generated_files.append("outputs/kundur_manual_force_directed.svg")
 
         print("\n" + "="*70)
         print("[SUCCESS] Generated Kundur System visualization:")
         for f in generated_files:
             print(f"  ✓ {f}")
         print(f"\n[INFO] Scale factors - Loads: {load_scale}x | Generators: {generator_scale}x | Transformers: {transformer_scale}x")
-        print("[INFO] Using NEATO layout for best accuracy!")
-        print("[INFO] Transformers shown with bold purple lines and voltage labels")
-        print("[INFO] Loads shown with reduced size for clarity")
+        print("[INFO] Graphviz NEATO layout - Voltage-color-coded busbars:")
+        print("       - Dark Red/Orange: EHV/HV (≥138kV) | Yellow/Gold: MHV (69-137kV)")
+        print("       - Green: MV (30-68kV) | Blue: LV (<30kV)")
         print("="*70)
 
     except Exception as e:

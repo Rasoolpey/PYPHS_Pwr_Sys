@@ -586,32 +586,46 @@ class AutoPHSVisualizer:
             }
         )
         
-        # Add buses as nodes
+        # Add buses as nodes with voltage-level color coding (thin busbars)
+        voltage_levels = set()  # Track unique voltage levels in system
+        
+        # First pass: collect all unique voltage levels
+        for bus in self.data.get('Bus', []):
+            voltage_levels.add(bus['Vn'])
+        
+        # Create color mapping for unique voltage levels
+        voltage_color_map = self._create_voltage_color_map(voltage_levels)
+        
+        # Second pass: create bus nodes
         for bus in self.data.get('Bus', []):
             bus_idx = bus['idx']
             bus_name = str(bus['name'])
             vn = bus['Vn']
             
-            # Color by voltage level
-            if vn < 100:
-                color = '#1565c0'
-                fillcolor = '#e3f2fd'
+            # Extract just the number from bus name (e.g., "BUS1" -> "1", "LOAD3" -> "3")
+            import re
+            number_match = re.search(r'\d+', bus_name)
+            if number_match:
+                label = number_match.group()
             else:
-                color = '#f57f17'
-                fillcolor = '#fff9c4'
+                label = str(bus_idx)  # Fallback to bus index
             
-            label = f"{bus_name}"
-            if show_voltage:
-                label += f"\\n{vn:.0f} kV"
+            # Get color for this specific voltage level
+            bar_color = voltage_color_map[vn]
             
             graph.node(
                 str(bus_idx),
                 label=label,
                 shape='box',
-                style='filled,rounded',
-                fillcolor=fillcolor,
-                color=color,
-                penwidth='2.5'
+                style='filled',
+                fillcolor=bar_color,
+                color=bar_color,
+                fontcolor='white',
+                penwidth='0',
+                width='0.12',  # Slightly wider for better visibility
+                height='0.8',  # Taller to look like a busbar
+                fixedsize='true',  # Force exact size (don't expand for label)
+                fontsize='9'  # Font size for number
             )
         
         # Add generators as separate nodes connected to buses (REDUCED SIZE)
@@ -787,11 +801,40 @@ class AutoPHSVisualizer:
                 penwidth='2.5'
             )
         
+        # Build voltage level legend with EXACT voltage values from the system
+        # Sort voltage levels in descending order for the legend
+        sorted_voltages = sorted(voltage_levels, reverse=True)
+        
+        # Build legend HTML with exact voltage values and their colors
+        if sorted_voltages:
+            legend_html = '<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0" CELLPADDING="4" BGCOLOR="white">\n'
+            legend_html += '        <TR><TD COLSPAN="2" BGCOLOR="#f0f0f0"><B>Bus Voltage Levels</B></TD></TR>\n'
+            
+            for vn in sorted_voltages:
+                color = voltage_color_map[vn]
+                # Format voltage value
+                if vn >= 1:
+                    voltage_label = f"{vn:.0f} kV"
+                else:
+                    voltage_label = f"{vn:.1f} kV"
+                
+                legend_html += f'        <TR><TD BGCOLOR="{color}" WIDTH="30"><FONT COLOR="white">   </FONT></TD><TD ALIGN="LEFT">{voltage_label}</TD></TR>\n'
+            
+            legend_html += '        </TABLE>>'
+            
+            graph.node(
+                'legend',
+                label=legend_html,
+                shape='plaintext',
+                fontsize='9'
+            )
+        
         # Render the graph
         try:
             output_path = graph.render(filename, format=format, cleanup=True)
             print(f"[COMPLETE] Graphviz visualization generated: {output_path}")
             print(f"[INFO] Layout engine: {layout_engine} | Format: {format}")
+            print(f"[INFO] Exact voltage levels in system ({len(sorted_voltages)}): {', '.join(f'{v:.0f}kV' for v in sorted_voltages)}")
             return output_path
         except Exception as e:
             print(f"[ERROR] Failed to render graph: {e}")
@@ -1139,7 +1182,7 @@ class AutoPHSVisualizer:
 
         svg.append('</svg>')
 
-        with open(filename, 'w') as f:
+        with open(filename, 'w', encoding='utf-8') as f:
             f.write("\n".join(svg))
 
         print(f"\n[COMPLETE] Auto-layout diagram generated: {filename}")
@@ -1358,7 +1401,7 @@ class AutoPHSVisualizer:
 
         svg.append('</svg>')
 
-        with open(filename, 'w') as f:
+        with open(filename, 'w', encoding='utf-8') as f:
             f.write("\n".join(svg))
 
         print(f"[COMPLETE] Electrical distance diagram generated: {filename}")
@@ -1436,7 +1479,7 @@ class AutoPHSVisualizer:
 
     def _draw_legend(self, svg, y, width):
         """Draw legend at bottom of SVG."""
-        svg.append(f'<rect x="50" y="{y}" width="{width-100}" height="55" fill="#f5f5f5" stroke="#bdbdbd" rx="5"/>')
+        svg.append(f'<rect x="50" y="{y}" width="{width-100}" height="90" fill="#f5f5f5" stroke="#bdbdbd" rx="5"/>')
         svg.append(f'<text x="70" y="{y+20}" font-family="Arial" font-size="12" font-weight="bold">Legend:</text>')
 
         # Generator
@@ -1461,13 +1504,40 @@ class AutoPHSVisualizer:
         svg.append(f'<line x1="640" y1="{y+25}" x2="690" y2="{y+25}" stroke="#424242" stroke-width="3"/>')
         svg.append(f'<text x="700" y="{y+30}" font-family="Arial" font-size="11">Transmission Line</text>')
 
-        # Bus
-        svg.append(f'<rect x="830" y="{y+12}" width="8" height="26" fill="#212121" rx="2"/>')
-        svg.append(f'<text x="850" y="{y+30}" font-family="Arial" font-size="11">Bus</text>')
-
         # Load
-        svg.append(f'<polygon points="920,{y+35} 935,{y+15} 950,{y+35}" fill="#ffebee" stroke="#d32f2f" stroke-width="2"/>')
-        svg.append(f'<text x="960" y="{y+30}" font-family="Arial" font-size="11">Load</text>')
+        svg.append(f'<polygon points="830,{y+35} 845,{y+15} 860,{y+35}" fill="#ffebee" stroke="#d32f2f" stroke-width="2"/>')
+        svg.append(f'<text x="870" y="{y+30}" font-family="Arial" font-size="11">Load</text>')
+        
+        # Busbar Voltage Levels - Second Row
+        svg.append(f'<text x="70" y="{y+60}" font-family="Arial" font-size="11" font-weight="bold">Busbar Voltage Levels:</text>')
+        
+        # EHV (>=345kV) - Dark Red
+        svg.append(f'<rect x="210" y="{y+48}" width="8" height="20" fill="#B71C1C" rx="1"/>')
+        svg.append(f'<text x="225" y="{y+62}" font-family="Arial" font-size="9">≥345kV</text>')
+        
+        # HV (230-344kV) - Deep Orange
+        svg.append(f'<rect x="290" y="{y+48}" width="8" height="20" fill="#E64A19" rx="1"/>')
+        svg.append(f'<text x="305" y="{y+62}" font-family="Arial" font-size="9">230-344kV</text>')
+        
+        # HV (138-229kV) - Orange
+        svg.append(f'<rect x="390" y="{y+48}" width="8" height="20" fill="#F57C00" rx="1"/>')
+        svg.append(f'<text x="405" y="{y+62}" font-family="Arial" font-size="9">138-229kV</text>')
+        
+        # MHV (69-137kV) - Yellow/Gold
+        svg.append(f'<rect x="490" y="{y+48}" width="8" height="20" fill="#F9A825" rx="1"/>')
+        svg.append(f'<text x="505" y="{y+62}" font-family="Arial" font-size="9">69-137kV</text>')
+        
+        # MV (30-68kV) - Green
+        svg.append(f'<rect x="580" y="{y+48}" width="8" height="20" fill="#388E3C" rx="1"/>')
+        svg.append(f'<text x="595" y="{y+62}" font-family="Arial" font-size="9">30-68kV</text>')
+        
+        # LV (10-29kV) - Blue
+        svg.append(f'<rect x="660" y="{y+48}" width="8" height="20" fill="#1976D2" rx="1"/>')
+        svg.append(f'<text x="675" y="{y+62}" font-family="Arial" font-size="9">10-29kV</text>')
+        
+        # VLV (<10kV) - Light Blue
+        svg.append(f'<rect x="740" y="{y+48}" width="8" height="20" fill="#42A5F5" rx="1"/>')
+        svg.append(f'<text x="755" y="{y+62}" font-family="Arial" font-size="9">&lt;10kV</text>')
 
     def _draw_parallel_lines(self, svg, p1, p2, lines):
         """Draw parallel transmission lines with offset."""
@@ -1703,17 +1773,93 @@ class AutoPHSVisualizer:
         label_y = ly + 24*node_size_factor
         svg.append(f'<text x="{lx:.1f}" y="{label_y:.1f}" font-family="Arial" font-size="{8*node_size_factor:.0f}" fill="#c62828" text-anchor="middle" stroke="white" stroke-width="3" paint-order="stroke">P={lp["p0"]:.2f}</text>')
 
+    def _get_voltage_color(self, voltage_kv):
+        """Return color based on voltage level using standard power system color conventions.
+        
+        Voltage levels and colors:
+        - Extra High Voltage (>= 345 kV): Dark Red
+        - High Voltage (230-344 kV): Red/Orange
+        - High Voltage (138-229 kV): Orange
+        - Medium High Voltage (69-137 kV): Yellow/Gold
+        - Medium Voltage (30-68 kV): Green
+        - Low Voltage (10-29 kV): Blue
+        - Very Low Voltage (< 10 kV): Light Blue
+        """
+        if voltage_kv >= 345:
+            return "#B71C1C"  # Dark Red (EHV)
+        elif voltage_kv >= 230:
+            return "#E64A19"  # Deep Orange (HV)
+        elif voltage_kv >= 138:
+            return "#F57C00"  # Orange (HV)
+        elif voltage_kv >= 69:
+            return "#F9A825"  # Yellow/Gold (MHV)
+        elif voltage_kv >= 30:
+            return "#388E3C"  # Green (MV)
+        elif voltage_kv >= 10:
+            return "#1976D2"  # Blue (LV)
+        else:
+            return "#42A5F5"  # Light Blue (VLV)
+
+    def _create_voltage_color_map(self, voltage_levels):
+        """Create a distinct color mapping for each unique voltage level.
+        
+        This ensures each voltage level gets its own color, even if multiple
+        levels fall into the same category.
+        """
+        sorted_voltages = sorted(voltage_levels, reverse=True)
+        num_levels = len(sorted_voltages)
+        
+        if num_levels == 0:
+            return {}
+        
+        # Define a quality color palette with good visual distinction
+        color_palette = [
+            "#B71C1C",  # Dark Red
+            "#E64A19",  # Deep Orange
+            "#F57C00",  # Orange
+            "#F9A825",  # Amber/Gold
+            "#7CB342",  # Light Green
+            "#388E3C",  # Green
+            "#00897B",  # Teal
+            "#0277BD",  # Light Blue
+            "#1976D2",  # Blue
+            "#303F9F",  # Indigo
+            "#512DA8",  # Deep Purple
+            "#C2185B",  # Pink
+            "#D32F2F",  # Red
+            "#F57C00",  # Deep Orange (alt)
+        ]
+        
+        color_map = {}
+        
+        # Assign colors based on number of unique voltage levels
+        if num_levels <= len(color_palette):
+            # Direct assignment from palette
+            for i, vn in enumerate(sorted_voltages):
+                color_map[vn] = color_palette[i]
+        else:
+            # More levels than colors - use palette with cycling
+            for i, vn in enumerate(sorted_voltages):
+                color_map[vn] = color_palette[i % len(color_palette)]
+        
+        return color_map
+
     def _draw_bus(self, svg, pos, bus, node_size_factor=1.0):
-        """Draw bus bar with clear, non-overlapping labels."""
+        """Draw bus bar as solid rectangle with voltage-level color coding.
+        
+        The busbar follows the universal symbol (solid rectangle) with color
+        indicating voltage level. No distinction between load/generator buses.
+        """
         bus_name = str(bus['name'])
         vn = bus['Vn']
 
-        # Color by voltage level
-        bar_color = "#1565c0" if vn < 100 else "#212121"
+        # Get color based on voltage level
+        bar_color = self._get_voltage_color(vn)
 
-        bar_width = 8 * node_size_factor
+        # Draw solid rectangle busbar (universal symbol)
+        bar_width = 10 * node_size_factor  # Slightly wider for better visibility
         bar_height = 50 * node_size_factor
-        svg.append(f'<rect x="{pos[0]-bar_width/2:.1f}" y="{pos[1]-bar_height/2:.1f}" width="{bar_width:.1f}" height="{bar_height:.1f}" fill="{bar_color}" rx="2"/>')
+        svg.append(f'<rect x="{pos[0]-bar_width/2:.1f}" y="{pos[1]-bar_height/2:.1f}" width="{bar_width:.1f}" height="{bar_height:.1f}" fill="{bar_color}" rx="1"/>')
         
         # Bus name above the bar with white background
         name_y = pos[1] - bar_height/2 - 7
@@ -1721,4 +1867,4 @@ class AutoPHSVisualizer:
         
         # Voltage label below the bar with white background
         voltage_y = pos[1] + bar_height/2 + 15*node_size_factor
-        svg.append(f'<text x="{pos[0]:.1f}" y="{voltage_y:.1f}" font-family="Arial" font-size="{9*node_size_factor:.0f}" fill="#757575" text-anchor="middle" stroke="white" stroke-width="3" paint-order="stroke">{vn:.0f}kV</text>')
+        svg.append(f'<text x="{pos[0]:.1f}" y="{voltage_y:.1f}" font-family="Arial" font-size="{9*node_size_factor:.0f}" fill="#424242" text-anchor="middle" stroke="white" stroke-width="3" paint-order="stroke">{vn:.0f}kV</text>')
