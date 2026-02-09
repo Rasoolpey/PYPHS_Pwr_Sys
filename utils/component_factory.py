@@ -23,6 +23,7 @@ class ComponentFactory:
             'EXDC2': {'category': 'exciter', 'module': 'exdc2'},
             'ESST3A': {'category': 'exciter', 'module': 'esst3a'},
             'EXST1': {'category': 'exciter', 'module': 'exst1'},
+            'IEEEX1': {'category': 'exciter', 'module': 'ieeex1'},
             
             # Governors
             'TGOV1': {'category': 'governor', 'module': 'tgov1'},

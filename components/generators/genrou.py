@@ -49,10 +49,11 @@ def genrou_dynamics(x, ports, meta):
     # Calculate field inductance Lf
     Xfl = (Xad * (xd1 - xl)) / (Xad - (xd1 - xl))
     Lf = Xad + Xfl
-    
-    # Scaling factor: Use Lf*2 for typical exciter per-unit base
-    # This gives Efd ≈ 1.2-1.5 pu at rated conditions
-    Kfd_scale = Lf * 2.0
+
+    # Scaling factor: Lf/Xad converts exciter-base Efd to stator-base field flux
+    # Derived from: at no-load, Efd = Xad * if, vf = Rfd * if
+    # Field equation: d(psi_f)/dt = (Efd * Lf/Xad - psi_f) / Td10
+    Kfd_scale = Lf / Xad
 
     # Rotor speed from momentum
     omega = p / M
@@ -110,9 +111,20 @@ def build_genrou_core(gen_data, S_system=100.0):
     xq = gen_data['xq'] * Z_scale
     xd1 = gen_data['xd1'] * Z_scale
     xq1 = gen_data['xq1'] * Z_scale
-    xd2 = gen_data['xd2'] * Z_scale
-    xq2 = gen_data['xq2'] * Z_scale
+    xd2_raw = gen_data['xd2'] * Z_scale
+    xq2_raw = gen_data['xq2'] * Z_scale
     xl = gen_data['xl'] * Z_scale
+
+    # Ensure xd2 > xl and xq2 > xl (physical constraint for GENROU model)
+    # If violated, clamp to midpoint between xl and xd1/xq1
+    if xd2_raw <= xl:
+        xd2 = xl + 0.5 * (xd1 - xl)
+    else:
+        xd2 = xd2_raw
+    if xq2_raw <= xl:
+        xq2 = xl + 0.5 * (xq1 - xl)
+    else:
+        xq2 = xq2_raw
     
     Td10 = gen_data['Td10']
     Td20 = gen_data['Td20']

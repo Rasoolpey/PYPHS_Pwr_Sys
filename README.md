@@ -59,9 +59,12 @@ This framework provides a **fully modular architecture** for Port-Hamiltonian mo
 │   ├── generators/               # Generator models (GENROU, etc.)
 │   │   └── genrou.py            # 6th order synchronous machine model
 │   ├── exciters/                # Excitation system models
-│   │   └── exdc2.py             # DC exciter type 2
+│   │   ├── exdc2.py             # DC exciter type 2
+│   │   ├── exst1.py             # IEEE ST1 static exciter
+│   │   └── esst3a.py            # IEEE ST3A static exciter
 │   ├── governors/               # Governor models
-│   │   └── tgov1.py             # Steam turbine governor
+│   │   ├── tgov1.py             # Steam turbine governor
+│   │   └── ieeeg1.py            # IEEE G1 multi-stage steam turbine
 │   ├── network/                 # Network elements
 │   │   └── network_builder.py  # Ybus construction and network analysis
 │   └── [future models]          # Add new component types here (loads, FACTS, etc.)
@@ -80,10 +83,16 @@ This framework provides a **fully modular architecture** for Port-Hamiltonian mo
 │   └── model_templates.py       # Component templates for rapid development
 │
 ├── test_cases/                   # System Configuration Files (JSON)
-│   ├── Kundur_System/           # Example: Kundur's 4-machine system
+│   ├── Kundur_System/           # Kundur's 4-machine, 2-area system (GENROU + EXDC2 + TGOV1)
 │   │   ├── kundur_full.json     # Complete system definition
 │   │   ├── system_config.json   # Alternative configuration
-│   │   └── EXAMPLE.md           # 📖 Detailed example documentation
+│   │   └── EXAMPLE.md           # Detailed example documentation
+│   ├── ieee14bus/               # IEEE 14-bus system (5 generators, mixed exciters/governors)
+│   │   └── ieee14_system.json   # GENROU + ESST3A/EXST1 + IEEEG1/TGOV1
+│   ├── ieee39bus/               # IEEE 39-bus (New England) system (10 generators)
+│   │   └── ieee39_system.json   # GENROU + ESST3A + IEEEG1
+│   ├── Thevenin_model/          # Single-machine infinite-bus (SMIB) system
+│   │   └── thevenin_system.json # GENROU + EXDC2 + TGOV1
 │   └── [Your_System]/           # Add your own test cases here
 │
 ├── outputs/                      # Generated plots and results
@@ -234,7 +243,11 @@ freqs, Z_est = scanner.post_process_tfe(sol, bus_idx)
 ```bash
 python main.py                      # Build and verify system
 python test_system.py               # Test individual components
-python test_modular_fault.py        # Test fault simulation
+python test_modular_fault.py        # Test fault simulation (Kundur system)
+python test_ieee14bus_nofault.py    # IEEE 14-bus equilibrium verification
+python test_ieee14bus_fault.py      # IEEE 14-bus fault simulation
+python test_ieee39bus_nofault.py    # IEEE 39-bus equilibrium verification
+python test_ieee39bus_fault.py      # IEEE 39-bus fault simulation
 python test_lyapunov.py             # Test Lyapunov stability analysis
 python test_impedance_scanning.py   # Test frequency-domain impedance
 python test_imtb_scanning.py        # Test IMTB multisine impedance
@@ -503,10 +516,13 @@ All component models follow a consistent Port-Hamiltonian structure and can be m
 
 **exciters/** - Excitation Systems
 - `exdc2.py`: DC exciter type 2 (IEEE standard)
+- `exst1.py`: Static exciter type 1 (IEEE ST1) with lead-lag and washout feedback
+- `esst3a.py`: Static exciter type ST3A (IEEE ESST3A) with VE compensation, rectifier model, inner/outer regulators
 - [Expandable]: Add SEXS, IEEET1, custom exciters
 
-**governors/** - Governor Models  
+**governors/** - Governor Models
 - `tgov1.py`: Steam turbine governor type 1
+- `ieeeg1.py`: IEEE G1 multi-stage steam turbine governor with 4 turbine/reheater stages and rate-limited valve control
 - [Expandable]: Add HYGOV, GGOV1, custom governors
 
 **network/** - Network Elements
@@ -581,10 +597,12 @@ All component models follow a consistent Port-Hamiltonian structure and can be m
 ## Technical Details
 
 ### State Vector Organization
-For an N-machine system:
-- Each generator: 13 states (7 electrical + 4 exciter + 2 governor)
-- Total: 13×N states for complete system dynamics
-- Dynamic sizing: System adapts to any number of generators defined in JSON
+For an N-machine system with variable component models:
+- Each generator (GENROU): 7 states (delta, omega, psi_d, psi_q, psi_f, psi_kd, psi_kq)
+- Exciter states vary by model: EXDC2 (4), EXST1 (4), ESST3A (5)
+- Governor states vary by model: TGOV1 (2), IEEEG1 (6)
+- Example: IEEE 14-bus with 5 generators = 85 total states
+- Dynamic sizing: System adapts to any number of generators and component types defined in JSON
 
 ### Network Solution
 
@@ -629,8 +647,12 @@ Pm = Pe (from network solution)        # Mechanical power
 **Part 3: Component Initialization (Exciters & Governors)**
 - **Exciters**: Full signal path tracing from terminal voltage to field voltage
   - EXDC2: vm → vr → efd → xf, working backward to compute Vref
-  - ESST3A: VE compensation → FEX(IN) → VB → VM → VR → LL_exc_x → Vref
+  - EXST1: vm → vll → vr → vf, backward chain to compute Vref (updated in metadata)
+  - ESST3A: Limit-aware initialization matching all internal clamps:
+    VE compensation → FEX(IN) → VB (VBMAX) → VM (VMMAX) → VG (VGMAX) → VR (VRMAX/VRMIN) → LL_exc_x (VIMAX/VIMIN) → Vref
 - **Governors**: Initialize gate position and reference power from Pm
+  - TGOV1: 2-state initialization (valve + turbine lag)
+  - IEEEG1: 6-state initialization (lead-lag + valve + 4 turbine stages)
 - All parameters read from component metadata (IEEE standards + JSON values)
 
 **Part 4: Network Consistency Refinement**
@@ -811,8 +833,10 @@ pf = run_power_flow(builder, coordinator, verbose=True)
 
 **Solution**:
 - Check component JSON for exact case of parameter names
-- Verify exciter has 'vref' (lowercase) in metadata after initialization
-- For EXDC2/ESST3A: saturation parameters SE_E1, SE_E2, E1, E2 must be correct
+- Verify exciter has 'vref'/'Vref' in metadata after initialization (set by init_fn)
+- For EXDC2: saturation parameters SE_E1, SE_E2, E1, E2 must be correct
+- For ESST3A: ensure VIMAX/VRMAX/Efd_max are large enough for the operating point (check init_fn output)
+- For EXST1: Vref is automatically computed by init_fn from Vt and Efd_desired
 
 ---
 
@@ -892,10 +916,39 @@ To contribute new models or analysis tools:
 
 ---
 
-**Framework Version**: 1.4
+**Framework Version**: 1.5
 **Last Updated**: February 2026
 
 ### Changelog
+
+**v1.5 (February 2026)**
+- **NEW: IEEE 14-Bus and IEEE 39-Bus Test Systems**
+  - IEEE 14-bus: 5 generators with mixed exciter/governor models (ESST3A/EXST1 + IEEEG1/TGOV1)
+  - IEEE 39-bus (New England): 10 generators with ESST3A + IEEEG1
+  - Both achieve machine-precision equilibrium (Max |dx/dt| < 1e-12)
+- **NEW: EXST1 Static Exciter (IEEE ST1)**
+  - 4-state model: voltage measurement, lead-lag compensator, regulator, washout feedback
+  - Dynamic output limits with field current compensation (KC * XadIfd)
+  - Anti-windup on regulator limits (VRMAX/VRMIN)
+  - Proper Vref back-calculation during initialization
+- **NEW: ESST3A Static Exciter (IEEE ST3A)**
+  - 5-state model with inner/outer voltage regulators
+  - VE compensation and FEX rectifier function (IN-based)
+  - Lead-lag compensator with input voltage limiters (VIMAX/VIMIN)
+  - Comprehensive limit-aware initialization matching ALL internal clamps:
+    VBMAX, VMMAX, VGMAX, VRMAX/VRMIN, VIMAX/VIMIN, Efd_max
+  - Handles operating points where multiple limiters are simultaneously active
+- **NEW: IEEEG1 Multi-Stage Steam Turbine Governor (IEEE G1)**
+  - 6-state model: lead-lag filter, valve position, 4 turbine/reheater stages
+  - Rate-limited valve speed (UO/UC) with anti-windup (PMIN/PMAX)
+  - Power fraction distribution across stages (K1-K8, auto-normalized)
+  - HP + LP turbine output computation
+- **Critical Bug Fixes for Exciter Initialization**
+  - Fixed Vref overwrite bug in power_flow.py: init_fn computed correct Vref but power_flow.py was overwriting it with Vt_actual, destroying the voltage error offset needed for equilibrium
+  - Fixed EXST1 init_fn: was discarding computed Vref (lambda returned x0 only); now properly updates metadata['Vref']
+  - Fixed ESST3A initialization to match ALL internal limits in dynamics function (VGMAX, VMMAX, VBMAX, hard Efd clip), preventing derivative mismatch at t=0
+  - Removed overly restrictive vref clip [0.8, 1.2] in ESST3A dynamics that prevented high-Vref operating points
+  - Fixed ESST3A_2 parameters in IEEE 14-bus JSON (VIMAX, VRMAX, Efd_max were too restrictive for operating point)
 
 **v1.4 (February 2026)**
 - **NEW: 4-Part Equilibrium Initialization Process**

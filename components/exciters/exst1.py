@@ -234,7 +234,11 @@ def build_exst1_core(exc_data, initial_conditions=None):
     core.set_metadata(metadata)
     core.n_states = 4
     core.output_fn = exst1_output
-    core.init_fn = lambda Efd_eq, V_mag, **kwargs: compute_initial_states(V_mag, Efd_eq, metadata)[0]
+    def _exst1_init(Efd_eq, V_mag, **kwargs):
+        x0, Vref_eq = compute_initial_states(V_mag, Efd_eq, metadata)
+        metadata['Vref'] = Vref_eq  # Update so dynamics uses correct reference
+        return x0
+    core.init_fn = _exst1_init
     core.component_type = "exciter"
     core.model_name = "EXST1"
 

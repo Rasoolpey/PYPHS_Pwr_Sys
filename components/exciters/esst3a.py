@@ -57,7 +57,8 @@ def esst3a_dynamics(x, ports, meta):
     KG = meta['KG']
     VGMAX = meta['VGMAX']
     THETAP = meta['THETAP']
-    vref = meta['vref']
+    # Use vref computed by init_fn (includes voltage error offset for equilibrium)
+    vref = meta.get('vref', 1.0)
     
     # State derivatives
     x_dot = np.zeros(5)
@@ -380,20 +381,89 @@ def esst3a_initialize(Efd_target, Vt, metadata, Vd=0.0, Vq=None, Id=0.0, Iq=0.0,
     # Rectifier voltage
     VB_eq = np.clip(VE * FEX, 0.0, VBMAX)
     
+    # Extract ALL limits to match dynamics function exactly
+    VRMAX = metadata.get('VRMAX', 99.0)
+    VRMIN = metadata.get('VRMIN', -99.0)
+    VMMAX = metadata.get('VMMAX', 99.0)
+    VMMIN = metadata.get('VMMIN', 0.0)
+    KM = metadata.get('KM', 8.0)
+    KG = metadata.get('KG', 1.0)
+    VGMAX = metadata.get('VGMAX', 3.86)
+    Efd_max = metadata.get('Efd_max', 5.0)
+    Efd_min = metadata.get('Efd_min', 0.0)
+
+    # Apply the same limits as the dynamics function
+    VMMAX_realistic = min(VMMAX, 10.0) if VMMAX < 90 else 10.0
+    VB_state_max = min(VBMAX, 5.0)
+    VB_eq_limited = np.clip(VB_eq, 0.0, VB_state_max)
+
+    # Apply hard Efd output limit (same as esst3a_output)
+    Efd_eff = np.clip(Efd_target, Efd_min, Efd_max)
+
     # Trace backwards from Efd through control chain
-    VM_eq = Efd_target / VB_eq if VB_eq > 1e-6 else 1.0
+    VM_eq = Efd_eff / VB_eq_limited if VB_eq_limited > 1e-6 else 1.0
+    # Apply internal VM limit for Efd/VG computation (dynamics line 148)
+    VM_eq_internal = np.clip(VM_eq, 0.1, 10.0)
+    # Recompute effective Efd with internal VM limit
+    Efd_eff = np.clip(VB_eq_limited * VM_eq_internal, 0.0, 5.0)  # Hard limit (dynamics line 150)
+
+    # VG with VGMAX limit (dynamics line 152)
+    VG_eff = np.clip(KG * Efd_eff, 0.0, VGMAX)
+
+    # Backward through inner regulator: VM = KM * (VR - VG), so vrs = VM/KM
     vrs_eq = VM_eq / KM if KM > 1e-6 else 0.0
-    VG_eq = KG * Efd_target
-    VR_eq = vrs_eq + VG_eq
+    VR_eq = vrs_eq + VG_eff  # Use VG_eff (clipped), not KG*Efd (unclipped)
+
     vil_eq = VR_eq / KA if KA > 1e-6 else 0.0
-    LL_exc_x_eq = vil_eq
-    
-    # Voltage reference (equilibrium condition)
-    Vref_eq = Vt + np.clip(vil_eq, VIMIN, VIMAX)
-    
+
+    # Apply input limiter - at equilibrium LL_exc_x must equal the
+    # CLAMPED input, otherwise x_dot[1] = (vil - LL_exc_x)/TC != 0
+    vil_clamped = np.clip(vil_eq, VIMIN, VIMAX)
+
+    if abs(vil_clamped - vil_eq) > 1e-8:
+        # Input limiter is active: recompute forward chain
+        VR_eq = np.clip(KA * vil_clamped, VRMIN, VRMAX)
+
+        # Solve feedback loop with VGMAX constraint:
+        # At equilibrium: Efd = VB * VM, VG = clip(KG*Efd, 0, VGMAX)
+        # vrs = VR - VG, VM = KM * vrs
+        # If VG < VGMAX (not clipped): Efd = VB*KM*(VR - KG*Efd)
+        # If VG = VGMAX (clipped): Efd = VB*KM*(VR - VGMAX)
+
+        # Try unclipped VG first
+        denom = 1.0 + VB_eq_limited * KM * KG
+        if abs(denom) > 1e-6:
+            Efd_try = VB_eq_limited * KM * VR_eq / denom
+        else:
+            Efd_try = Efd_target
+        VG_try = KG * Efd_try
+
+        if VG_try > VGMAX:
+            # VG is clipped: use VG = VGMAX
+            vrs_eq = VR_eq - VGMAX
+            VM_eq = np.clip(KM * vrs_eq, VMMIN, VMMAX_realistic)
+            Efd_eff = np.clip(VB_eq_limited * np.clip(VM_eq, 0.1, 10.0), 0.0, 5.0)
+        else:
+            Efd_eff = np.clip(Efd_try, 0.0, 5.0)
+            VG_eff = np.clip(KG * Efd_eff, 0.0, VGMAX)
+            vrs_eq = VR_eq - VG_eff
+            VM_eq = np.clip(KM * vrs_eq, VMMIN, VMMAX_realistic)
+
+        VM_eq = Efd_eff / VB_eq_limited if VB_eq_limited > 1e-6 else 1.0
+    else:
+        # No input limiting: apply remaining limits for consistency
+        VR_eq = np.clip(VR_eq, VRMIN, VRMAX)
+        VM_eq = np.clip(VM_eq, VMMIN, VMMAX_realistic)
+
+    LL_exc_x_eq = vil_clamped
+
+    # Voltage reference: at equilibrium vi = vref - Vt, and vil = clip(vi, VIMIN, VIMAX)
+    # We need vil = vil_clamped, so vi must produce that after clipping
+    Vref_eq = Vt + vil_clamped
+
     # Update metadata with equilibrium Vref
     metadata['vref'] = Vref_eq
-    
+
     # Return initial states: [LG_y, LL_exc_x, VR, VM, VB_state]
     return np.array([Vt, LL_exc_x_eq, VR_eq, VM_eq, VB_eq])
 

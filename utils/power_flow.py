@@ -41,7 +41,7 @@ class PowerFlowSolver:
         self._build_bus_data(verbose)
         
         # Convergence parameters
-        self.max_iter = 100  # Increased for robustness with large systems
+        self.max_iter = 200  # Robust for large systems
         self.tol = 1e-4  # Practical convergence tolerance
         
         if verbose:
@@ -328,28 +328,21 @@ class PowerFlowSolver:
                         print(f"  Singular Jacobian at iteration {iteration}")
                     return False
             
-            # Adaptive damping based on iteration and mismatch size
+            # Adaptive damping based on step size (not mismatch)
             max_dx_theta = np.max(np.abs(dx[:n_theta])) if n_theta > 0 else 0
             max_dx_V = np.max(np.abs(dx[n_theta:])) if n_V > 0 else 0
-            
-            # Adaptive damping strategy - more aggressive to speed convergence
-            if iteration < 3:
-                # Moderate damping in first iterations
-                damping = 0.5
-            elif max_mismatch > 1.0:
-                # Moderate damping for large mismatches
-                damping = 0.6
-            elif max_mismatch > 0.5:
-                # Light damping
-                damping = 0.8
-            elif max_dx_theta > 0.5 or max_dx_V > 0.2:
-                # Damp very large updates
-                damping = 0.7
+
+            # Damping only when Newton steps are excessively large
+            if max_dx_theta > 1.0 or max_dx_V > 0.5:
+                # Scale down to reasonable step size
+                damping = min(1.0, 0.5 / max(max_dx_theta, 2.0 * max_dx_V))
+            elif max_dx_theta > 0.3 or max_dx_V > 0.15:
+                damping = 0.85
             else:
-                # Full Newton steps when reasonably close
+                # Full Newton step for normal convergence
                 damping = 1.0
-            
-            if verbose and iteration < 3:
+
+            if verbose and damping < 1.0 and iteration < 5:
                 print(f"  Applying damping factor {damping:.2f} (max_dx_theta={max_dx_theta:.4f}, max_dx_V={max_dx_V:.4f})")
             
             # Update voltages and angles with damping
@@ -424,7 +417,7 @@ class PowerFlowSolver:
                 if i == j:
                     # Diagonal
                     Yii = self.Ybus[i, i]
-                    val = self.V[i] * np.abs(Yii) * np.cos(np.angle(Yii))
+                    val = 2 * self.V[i] * np.abs(Yii) * np.cos(np.angle(Yii))
                     for k in range(self.n_bus):
                         if k != i:
                             Yik = self.Ybus[i, k]
@@ -465,18 +458,18 @@ class PowerFlowSolver:
                 if i == j:
                     # Diagonal
                     Yii = self.Ybus[i, i]
-                    val = -self.V[i] * np.abs(Yii) * np.sin(np.angle(Yii))
+                    val = -2 * self.V[i] * np.abs(Yii) * np.sin(np.angle(Yii))
                     for k in range(self.n_bus):
                         if k != i:
                             Yik = self.Ybus[i, k]
-                            val -= self.V[k] * np.abs(Yik) * np.sin(
+                            val += self.V[k] * np.abs(Yik) * np.sin(
                                 self.theta[i] - self.theta[k] - np.angle(Yik)
                             )
                     J[n_theta + idx_i, n_theta + idx_j] = val
                 else:
                     # Off-diagonal
                     Yij = self.Ybus[i, j]
-                    J[n_theta + idx_i, n_theta + idx_j] = -self.V[i] * np.abs(Yij) * np.sin(
+                    J[n_theta + idx_i, n_theta + idx_j] = self.V[i] * np.abs(Yij) * np.sin(
                         self.theta[i] - self.theta[j] - np.angle(Yij)
                     )
         
@@ -742,6 +735,17 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
     if verbose:
         print(f"\nBuilding state vector for all components...")
     
+    # Build scheduled generator power targets from JSON (use PF setpoints, not net injection)
+    gen_p_set = {}
+    slack_entries = {s['bus']: s for s in builder.system_data.get('Slack', [])}
+    pv_entries = {p['bus']: p for p in builder.system_data.get('PV', [])}
+    for meta in builder.gen_metadata:
+        bus_idx = meta['bus']
+        if bus_idx in slack_entries:
+            gen_p_set[bus_idx] = slack_entries[bus_idx].get('p0', 0.0)
+        elif bus_idx in pv_entries:
+            gen_p_set[bus_idx] = pv_entries[bus_idx].get('p0', 0.0)
+
     # Build state index map for heterogeneous components (same as fault_sim_modular.py)
     gen_state_counts = [gen.n_states for gen in builder.generators] if n_gen > 0 else []
     exc_state_counts = [exc.n_states for exc in builder.exciters] if n_gen > 0 else []
@@ -788,14 +792,15 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
             exc_core = builder.exciters[i]
             exc_meta = builder.exc_metadata[i]
             
-            # Calculate target field voltage
+            # Calculate target field voltage (match generator scaling)
             xd = meta['xd']
             xl = meta['xl']
             xd1 = meta['xd1']
             Xad = xd - xl
             Xfl = (Xad * (xd1 - xl)) / (Xad - (xd1 - xl))
             Lf = Xad + Xfl
-            Kfd_scale = Lf * 2.0
+            Xad_safe = max(Xad, 1e-6)
+            Kfd_scale = Lf / Xad_safe
             Efd_raw = psi_f_vals[i] / Kfd_scale
             
             # Use calculated Efd directly - no hardcoded clipping
@@ -814,7 +819,12 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
                 gen_type = "SLACK" if i in slack_gen_indices else "PV"
                 print(f"  Gen {i} ({gen_type}): psi_f={psi_f_vals[i]:.3f}, Efd_target={Efd_target:.3f}")
             
-            # GENERIC initialization - call component's init_fn (NO hardcoded model logic)
+            # GENERIC initialization - call component's init_fn
+            # init_fn computes and sets the correct Vref internally (including any
+            # voltage error offset needed to produce the required Efd).
+            # Do NOT overwrite vref afterwards - doing so would zero out the error
+            # signal while leaving LL_exc_x/VR at non-zero values, creating
+            # massive initial derivatives.
             if exc_core.init_fn is not None:
                 exc_x0 = exc_core.init_fn(Efd_eq=Efd_target, V_mag=V_mag[i])
             else:
@@ -946,7 +956,8 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
                 Xad = xd - xl
                 Xfl = (Xad * (xd1 - xl)) / (Xad - (xd1 - xl))
                 Lf = Xad + Xfl
-                Kfd_scale = Lf * 2.0
+                Xad_safe = max(Xad, 1e-6)
+                Kfd_scale = Lf / Xad_safe
                 
                 # Calculate state offsets within this machine's state vector
                 n_gen_states_i = gen_state_counts[i]
@@ -970,6 +981,8 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
                     # Update exciter states
                     for j in range(exc_state_counts[i]):
                         machine_x[exc_offset + j] = exc_x_refined[j]
+                    # Vref was already set correctly by init_fn (includes voltage
+                    # error offset). Do NOT overwrite to Vt_actual.
                     
                     if verbose:
                         print(f"  Gen {i}: {exc_core.model_name} refined with actual network V/I")
@@ -990,14 +1003,11 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
                 gov_core = builder.governors[i]
                 gov_meta = builder.gov_metadata[i]
                 
-                Pm_adjusted = P_elec[i]
-
-                # Only clamp negative values (physically unreasonable)
-                if Pm_adjusted < 0:
-                    if verbose:
-                        gen_type = "SLACK" if i in slack_gen_indices else "PV"
-                        print(f"  Gen {i} ({gen_type}): WARNING - negative network Pm={Pm_adjusted:.3f}, clamping to 0.0")
-                    Pm_adjusted = 0.0
+                # Use solved electrical air-gap power as target (magnitude)
+                Pm_adjusted = abs(P_elec[i])
+                if verbose and P_elec[i] < 0:
+                    gen_type = "SLACK" if i in slack_gen_indices else "PV"
+                    print(f"  Gen {i} ({gen_type}): Pe negative, using |Pe| -> {Pm_adjusted:.3f}")
                 
                 # Generic governor adjustment: re-initialize with adjusted Pm
                 if gov_core.init_fn is not None:
@@ -1009,7 +1019,12 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
                     for j in range(gov_state_counts[i]):
                         machine_x[gov_offset + j] = Pm_adjusted
                 
+                # Update both builder metadata and core metadata so droop uses the solved setpoint
                 builder.gov_metadata[i]['Pref'] = Pm_adjusted
+                builder.gov_metadata[i]['wref'] = 1.0
+                if hasattr(gov_core, 'meta'):
+                    gov_core.meta['Pref'] = Pm_adjusted
+                    gov_core.meta['wref'] = 1.0
     
     # ========================================================================
     # PART 5: ASSEMBLE FINAL STATE VECTOR (fully generic)

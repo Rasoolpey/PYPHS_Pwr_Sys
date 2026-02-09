@@ -1,0 +1,24 @@
+{
+  "description": "IEEE 39-bus (New England) system - No fault simulation with power flow initialization",
+  "time": {
+    "t_end": 15.0,
+    "n_points": 3000
+  },
+  "fault": {
+    "enabled": false
+  },
+  "solver": {
+    "method": "Radau",
+    "rtol": 1e-6,
+    "atol": 1e-8
+  },
+  "initialization": {
+    "run_power_flow": true,
+    "power_flow_verbose": true
+  },
+  "output": {
+    "directory": "outputs",
+    "save_states": true,
+    "plot_format": "png"
+  }
+}

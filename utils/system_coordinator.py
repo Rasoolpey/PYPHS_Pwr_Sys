@@ -133,16 +133,16 @@ class PowerSystemCoordinator:
     def _build_ybus(self):
         """Build Ybus matrix dynamically from Line data.
 
-        Note: Per-unit values in JSON are already on common 100 MVA base.
-        For transformers, the impedance is given on common base, so NO
-        turns ratio scaling is needed in the Ybus construction.
+        Handles both transmission lines (pi-model) and transformers (tap ratio model).
+        Also includes standalone Shunt elements from JSON.
+        Per-unit values in JSON are already on common 100 MVA base.
         """
         lines = self.system_data.get('Line', [])
 
         # Initialize Ybus
         self.Ybus_base = np.zeros((self.n_bus, self.n_bus), dtype=complex)
 
-        # Process each line
+        # Process each line/transformer
         for line in lines:
             bus1_idx = line['bus1']
             bus2_idx = line['bus2']
@@ -157,8 +157,11 @@ class PowerSystemCoordinator:
             r = line['r']
             x = line['x']
             b = line.get('b', 0.0)
+            tap = line.get('tap', 1.0)
+            Vn1 = line.get('Vn1', 1.0)
+            Vn2 = line.get('Vn2', 1.0)
 
-            # Series admittance (per-unit values already on common base)
+            # Series admittance
             z_series = complex(r, x)
             if abs(z_series) > 1e-10:
                 y_series = 1.0 / z_series
@@ -168,12 +171,33 @@ class PowerSystemCoordinator:
             # Shunt admittance (line charging)
             y_shunt = complex(0, b / 2)
 
-            # Standard pi-model for both lines and transformers
-            # (per-unit values are already on common 100 MVA base)
-            self.Ybus_base[i, i] += y_series + y_shunt
-            self.Ybus_base[j, j] += y_series + y_shunt
-            self.Ybus_base[i, j] -= y_series
-            self.Ybus_base[j, i] -= y_series
+            # Determine if this is a transformer (different voltage levels or tap != 1.0)
+            is_transformer = (Vn1 != Vn2) or (abs(tap - 1.0) > 1e-6)
+
+            if is_transformer:
+                # Transformer model with off-nominal tap ratio
+                # Tap is on bus1 side: t = tap (effective turns ratio)
+                t = tap
+                self.Ybus_base[i, i] += y_series / (t * t) + y_shunt
+                self.Ybus_base[j, j] += y_series + y_shunt
+                self.Ybus_base[i, j] -= y_series / t
+                self.Ybus_base[j, i] -= y_series / t
+            else:
+                # Standard pi-model for transmission lines
+                self.Ybus_base[i, i] += y_series + y_shunt
+                self.Ybus_base[j, j] += y_series + y_shunt
+                self.Ybus_base[i, j] -= y_series
+                self.Ybus_base[j, i] -= y_series
+
+        # Process standalone Shunt elements
+        shunts = self.system_data.get('Shunt', [])
+        for shunt in shunts:
+            bus_idx = shunt['bus']
+            if bus_idx in self.bus_idx_to_internal:
+                i = self.bus_idx_to_internal[bus_idx]
+                g = shunt.get('g', 0.0)
+                b_shunt = shunt.get('b', 0.0)
+                self.Ybus_base[i, i] += complex(g, b_shunt)
 
     def _build_reduced_network(self):
         """

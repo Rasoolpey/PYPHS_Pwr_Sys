@@ -271,7 +271,8 @@ def build_ieeeg1_core(gov_data, S_machine=900.0, S_system=100.0, initial_conditi
         'K7n': K7n,
         'K8n': K8n,
         'wref': wref,
-        'Tm0': Tm0
+        'Tm0': Tm0,
+        'Pref': Tm0
     }
 
     # Initialize states: [xll, vpos, x4, x5, x6, x7]

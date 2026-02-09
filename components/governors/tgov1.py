@@ -90,17 +90,23 @@ def build_tgov1_core(gov_data, S_machine=900.0, S_system=100.0):
         metadata: dict with additional info
     """
     core = DynamicsCore(label=f'TGOV1_{gov_data["idx"]}', dynamics_fn=tgov1_dynamics)
-    
+
     # Extract and scale parameters
+    base_ratio = S_machine / S_system  # convert machine-base pu to system-base pu
     R_machine = max(gov_data['R'], 0.001)
     R_val = R_machine * (S_system / S_machine)
     T1 = max(gov_data['T1'], 0.001)
     T2 = max(gov_data['T2'], 0.001)
     T3 = max(gov_data['T3'], 0.001)
     Dt = gov_data.get('Dt', 0.0)
-    
+
+    # Governor limits are provided on machine base; scale to system base so they
+    # do not clip realistic mechanical power on heavily loaded machines.
+    VMAX_sys = gov_data['VMAX'] * base_ratio
+    VMIN_sys = gov_data['VMIN'] * base_ratio
+
     wref = 1.0
-    Pref = 1.0
+    Pref = base_ratio  # default reference ~1 pu on machine base
     
     # States
     x1, x2 = core.symbols(['x1_gov', 'x2_gov'])
@@ -149,8 +155,8 @@ def build_tgov1_core(gov_data, S_machine=900.0, S_system=100.0):
         'T1': T1,
         'T2': T2,
         'T3': T3,
-        'VMAX': gov_data['VMAX'],
-        'VMIN': gov_data['VMIN'],
+        'VMAX': VMAX_sys,
+        'VMIN': VMIN_sys,
         'Dt': Dt,
         'wref': wref,
         'Pref': Pref
