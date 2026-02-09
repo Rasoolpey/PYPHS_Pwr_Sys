@@ -34,7 +34,8 @@ class MockBuilder:
 
 
 def run_auto_visualization(spacing_factor=2.0, node_size_factor=1.0,
-                           angle_spread=False, strict_component_clearance=False, bus_clearance=0.0):
+                           angle_spread=False, strict_component_clearance=False, bus_clearance=0.0,
+                           distance_scale='log', min_distance=0.02, max_distance=1.0):
     """
     Generate IEEE 39-bus visualizations with adjustable component spacing and sizes.
     
@@ -90,6 +91,7 @@ def run_auto_visualization(spacing_factor=2.0, node_size_factor=1.0,
 
         print("\n" + "-"*50)
         print(f"Generating ELECTRICAL DISTANCE layout (spacing={spacing_factor}x, size={node_size_factor}x)...")
+        print(f"  Distance scaling: {distance_scale} | Min: {min_distance} | Max: {max_distance}")
         print("-"*50)
         viz.draw_electrical_distance("outputs/ieee39_electrical_distance.svg",
                                      svg_width=1800, svg_height=1200,
@@ -97,7 +99,10 @@ def run_auto_visualization(spacing_factor=2.0, node_size_factor=1.0,
                                      node_size_factor=node_size_factor,
                                      angle_spread=angle_spread,
                                      strict_component_clearance=strict_component_clearance,
-                                     bus_clearance=bus_clearance)
+                                     bus_clearance=bus_clearance,
+                                     distance_scale=distance_scale,
+                                     min_distance=min_distance,
+                                     max_distance=max_distance)
 
         print("\n" + "="*70)
         print("[SUCCESS] Generated 3 IEEE 39-bus auto-layout visualizations:")
@@ -135,10 +140,18 @@ if __name__ == "__main__":
     STRICT_CLEARANCE = False  # <-- Enforce no overlaps between all components
     BUS_CLEARANCE = 0.5  # <-- Extra spacing between buses
     
+    # Distance scaling parameters (for electrical distance layout only)
+    DISTANCE_SCALE = 'log'  # <-- 'linear', 'log', or 'sqrt'
+    MIN_DISTANCE = 0.02  # <-- Minimum distance (prevents buses too close) - For log: use 0.02-0.05
+    MAX_DISTANCE = 1.0  # <-- Maximum distance (prevents buses too far) - For log: use 0.8-1.5
+    
     run_auto_visualization(
         spacing_factor=SPACING_FACTOR,
         node_size_factor=NODE_SIZE_FACTOR,
         angle_spread=ANGLE_SPREAD,
         strict_component_clearance=STRICT_CLEARANCE,
-        bus_clearance=BUS_CLEARANCE
+        bus_clearance=BUS_CLEARANCE,
+        distance_scale=DISTANCE_SCALE,
+        min_distance=MIN_DISTANCE,
+        max_distance=MAX_DISTANCE
     )

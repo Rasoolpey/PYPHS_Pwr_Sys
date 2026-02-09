@@ -38,28 +38,58 @@ def run_auto_visualization():
 
     print("\n" + "="*70)
     print("   AUTO-LAYOUT POWER SYSTEM VISUALIZER")
-    print("   Positions computed from electrical distances (no hardcoding)")
+    print("   Using Professional Graph Layout (VS Code Debug Visualizer Style)")
     print("="*70)
 
     try:
         builder = MockBuilder(JSON_PATH)
         viz = AutoPHSVisualizer(builder)
 
-        # Generate visualizations with different layout methods
+        # NEW: Generate professional Graphviz visualizations (like VS Code Debug Visualizer)
         print("\n" + "-"*50)
-        print("Generating HIERARCHICAL layout...")
+        print("Generating GRAPHVIZ layouts (Professional Quality)...")
         print("-"*50)
-        viz.draw("outputs/auto_layout_hierarchical.svg", layout_method="hierarchical")
+        
+        # Try different Graphviz engines
+        engines = [
+            ("dot", "Hierarchical layout (best for power systems)"),
+            ("neato", "Spring model layout"),
+            ("fdp", "Force-directed placement"),
+        ]
+        
+        generated_files = []
+        for engine, description in engines:
+            print(f"\n[{engine.upper()}] {description}")
+            output = viz.draw_graphviz(
+                filename=f"outputs/graphviz_{engine}",
+                layout_engine=engine,
+                format="svg",
+                show_impedance=True,
+                show_voltage=True
+            )
+            if output:
+                generated_files.append(output)
 
+        # OLD: Original manual SVG generation (for comparison)
         print("\n" + "-"*50)
-        print("Generating FORCE-DIRECTED layout...")
+        print("Generating MANUAL SVG layouts (original approach)...")
         print("-"*50)
-        viz.draw("outputs/auto_layout_force_directed.svg", layout_method="force_directed")
+        
+        print("\n[MANUAL] Hierarchical layout...")
+        viz.draw("outputs/manual_hierarchical.svg", layout_method="hierarchical", 
+                spacing_factor=2.0, strict_component_clearance=True)
+        generated_files.append("outputs/manual_hierarchical.svg")
+        
+        print("\n[MANUAL] Force-directed layout...")
+        viz.draw("outputs/manual_force_directed.svg", layout_method="force_directed",
+                spacing_factor=2.0, strict_component_clearance=True)
+        generated_files.append("outputs/manual_force_directed.svg")
 
         print("\n" + "="*70)
-        print("[SUCCESS] Generated 2 auto-layout visualizations:")
-        print("  - outputs/auto_layout_hierarchical.svg")
-        print("  - outputs/auto_layout_force_directed.svg")
+        print("[SUCCESS] Generated visualizations:")
+        for f in generated_files:
+            print(f"  ✓ {f}")
+        print("\n[RECOMMENDED] Open the Graphviz outputs for VS Code-style quality!")
         print("="*70)
 
     except Exception as e:

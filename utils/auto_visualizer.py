@@ -10,12 +10,28 @@ Key Features:
 - Automatic separation by voltage levels
 - Area-aware positioning when area data is available
 - Supports any power system topology
+
+Recent Improvements (Inspired by VS Code Debug Visualizer):
+- Fixed duplicate label rendering that caused text overlap
+- Improved collision detection with simplified spiral search algorithm
+- Enhanced text positioning using perpendicular offsets to minimize overlap
+- Added white text backgrounds (paint-order: stroke) for better readability
+- Fixed layout normalization to preserve aspect ratio and prevent cramming
+- Increased margins and spacing for cleaner, more readable diagrams
+- All labels now positioned strategically to avoid component overlap
 """
 
 import numpy as np
 import pandas as pd
 from collections import defaultdict
 import networkx as nx
+try:
+    import graphviz
+    GRAPHVIZ_AVAILABLE = True
+except ImportError:
+    GRAPHVIZ_AVAILABLE = False
+    print("[WARNING] graphviz package not available. Install with: pip install graphviz")
+    print("[WARNING] Also ensure Graphviz is installed: https://graphviz.org/download/")
 
 
 class AutoPHSVisualizer:
@@ -35,10 +51,18 @@ class AutoPHSVisualizer:
             self.bus_name_to_idx[str(bus['name'])] = bus['idx']
             self.bus_info[bus['idx']] = bus
 
-    def compute_electrical_distance_matrix(self):
+    def compute_electrical_distance_matrix(self, scale_method='linear', min_distance=None, max_distance=None):
         """
         Compute electrical distance matrix based on line impedances.
         Distance = |Z| = sqrt(r² + x²) for direct connections, infinity otherwise.
+        
+        Args:
+            scale_method: How to scale distances for better visual layout:
+                - 'linear': Use raw impedance values (default)
+                - 'log': Logarithmic scaling log(1 + Z) for compressed range
+                - 'sqrt': Square root scaling sqrt(Z) for moderate compression
+            min_distance: Minimum distance clamp (prevents too-close buses)
+            max_distance: Maximum distance clamp (prevents too-far buses)
         """
         buses = list(self.bus_info.keys())
         n = len(buses)
@@ -65,6 +89,25 @@ class AutoPHSVisualizer:
                 for j in range(n):
                     if dist_matrix[i, k] + dist_matrix[k, j] < dist_matrix[i, j]:
                         dist_matrix[i, j] = dist_matrix[i, k] + dist_matrix[k, j]
+        
+        # Apply distance scaling transformation
+        if scale_method == 'log':
+            # Logarithmic scaling: compresses large distances
+            finite_mask = np.isfinite(dist_matrix)
+            dist_matrix[finite_mask] = np.log1p(dist_matrix[finite_mask])  # log(1 + x)
+        elif scale_method == 'sqrt':
+            # Square root scaling: moderate compression
+            finite_mask = np.isfinite(dist_matrix)
+            dist_matrix[finite_mask] = np.sqrt(dist_matrix[finite_mask])
+        # else: 'linear' - no transformation
+        
+        # Apply min/max distance clamping if specified
+        if min_distance is not None or max_distance is not None:
+            finite_mask = np.isfinite(dist_matrix)
+            if min_distance is not None:
+                dist_matrix[finite_mask] = np.maximum(dist_matrix[finite_mask], min_distance)
+            if max_distance is not None:
+                dist_matrix[finite_mask] = np.minimum(dist_matrix[finite_mask], max_distance)
 
         return buses, dist_matrix
 
@@ -118,48 +161,116 @@ class AutoPHSVisualizer:
         
         return coords
 
-    def compute_layout_mds(self, width=1400, height=800, spacing_factor=1.0):
+    def compute_layout_mds(self, width=1400, height=800, spacing_factor=1.0, 
+                          scale_method='linear', min_distance=None, max_distance=None):
         """
-        Compute node positions using NetworkX's spectral layout.
+        Compute node positions using spring layout with clamped edge weights.
         
-        Spectral layout uses eigenvectors of the graph Laplacian to compute optimal
-        positions that naturally separate nodes with good spacing.
-        This gives physically meaningful layouts with automatic overlap prevention.
+        Uses Kamada-Kawai or spring layout with edge weights derived from 
+        scaled and clamped electrical distances. This provides natural spacing
+        while respecting distance constraints.
         
         Args:
             width: Canvas width
             height: Canvas height
             spacing_factor: Multiplier for bus spacing (default=1.0)
+            scale_method: Distance scaling ('linear', 'log', 'sqrt')
+            min_distance: Minimum distance clamp
+            max_distance: Maximum distance clamp
             
         Returns:
             Tuple of (coordinates dict, bus list, distance matrix)
         """
-        buses, dist_matrix = self.compute_electrical_distance_matrix()
+        buses = list(self.bus_info.keys())
         n = len(buses)
 
         if n == 0:
-            return {}, buses, dist_matrix
+            return {}, buses, np.array([])
 
-        # Create NetworkX graph
+        # Create NetworkX graph with weighted edges
         G = nx.Graph()
         for bus in buses:
             G.add_node(bus)
         
-        # Add edges with impedance weights
+        # Build distance matrix for reference
+        bus_to_idx = {b: i for i, b in enumerate(buses)}
+        dist_matrix = np.full((n, n), np.inf)
+        np.fill_diagonal(dist_matrix, 0)
+        
+        # Add edges with scaled and clamped distances
         for line in self.data.get('Line', []):
             b1, b2 = line['bus1'], line['bus2']
             if b1 in buses and b2 in buses:
+                # Calculate raw impedance
                 z_mag = np.sqrt(line['r']**2 + line['x']**2)
-                # Use impedance directly as weight (higher impedance = weaker connection)
-                G.add_edge(b1, b2, weight=z_mag)
+                
+                # Apply scaling transformation
+                if scale_method == 'log':
+                    z_scaled = np.log1p(z_mag)
+                elif scale_method == 'sqrt':
+                    z_scaled = np.sqrt(z_mag)
+                else:  # 'linear'
+                    z_scaled = z_mag
+                
+                # Apply min/max clamping
+                if min_distance is not None:
+                    z_scaled = max(z_scaled, min_distance)
+                if max_distance is not None:
+                    z_scaled = min(z_scaled, max_distance)
+                
+                # Add edge with clamped distance as weight
+                # For spring layout, use distance directly as the target length
+                if G.has_edge(b1, b2):
+                    # For parallel lines, use minimum (stronger connection)
+                    G[b1][b2]['weight'] = min(G[b1][b2]['weight'], z_scaled)
+                else:
+                    G.add_edge(b1, b2, weight=z_scaled)
+                
+                # Update distance matrix
+                i, j = bus_to_idx[b1], bus_to_idx[b2]
+                dist_matrix[i, j] = min(dist_matrix[i, j], z_scaled)
+                dist_matrix[j, i] = dist_matrix[i, j]
         
-        # Try spectral layout first (best for structured graphs)
+        # Try Kamada-Kawai layout first (respects edge weights as distances)
         try:
-            pos = nx.spectral_layout(G, dim=2, weight='weight')
+            print("[INFO] Using Kamada-Kawai layout for distance preservation...")
+            pos = nx.kamada_kawai_layout(G, weight='weight', scale=1.0)
         except:
-            # Fallback to spring layout if spectral fails (e.g., disconnected components)
-            print("[INFO] Spectral layout failed, using spring layout...")
-            pos = nx.spring_layout(G, k=2.5 * spacing_factor, iterations=100, weight='weight', seed=42)
+            # Fallback to spring layout with appropriate parameters
+            print("[INFO] Kamada-Kawai failed, using spring layout...")
+            # For spring layout, convert distances to spring constants
+            # Shorter edges = stronger springs = higher weight
+            for u, v, data in G.edges(data=True):
+                distance = data['weight']
+                # Inverse relationship: shorter distance = stronger spring
+                data['spring_weight'] = 1.0 / (distance + 0.01)
+            
+            pos = nx.spring_layout(G, weight='spring_weight', k=0.5*spacing_factor, 
+                                  iterations=100, seed=42, scale=1.0)
+        
+        # Scale positions to canvas size
+        positions = np.array([pos[bus] for bus in buses])
+        positions -= positions.mean(axis=0)
+        
+        # Apply canvas scaling
+        scale_factor = min(width, height) * 0.35 * spacing_factor
+        max_extent = np.max(np.abs(positions))
+        if max_extent > 0:
+            positions = positions / max_extent * scale_factor
+        
+        # Translate to canvas center with margins
+        margin = 200
+        positions[:, 0] += width / 2
+        positions[:, 1] += height / 2
+        
+        # Ensure all positions are within bounds
+        positions[:, 0] = np.clip(positions[:, 0], margin, width - margin)
+        positions[:, 1] = np.clip(positions[:, 1], margin, height - margin)
+        
+        # Create coordinate dictionary
+        coords = {buses[i]: (positions[i, 0], positions[i, 1]) for i in range(n)}
+
+        return coords, buses, dist_matrix
         
         # Extract positions and apply scale factor for better spacing
         scale_factor = min(width, height) * 0.35 * spacing_factor  # Apply spacing factor to scale
@@ -411,6 +522,241 @@ class AutoPHSVisualizer:
                 self.occupied_regions.append((x - bar_width / 2, y - bar_height / 2,
                                               x + bar_width / 2, y + bar_height / 2))
 
+    def draw_graphviz(self, filename="power_system_graphviz", layout_engine="dot", 
+                     format="svg", show_impedance=True, show_voltage=True):
+        """
+        Generate professional graph visualization using Graphviz (same as VS Code Debug Visualizer).
+        
+        This method delegates ALL layout, spacing, and rendering to Graphviz - the same
+        professional graph layout engine used by VS Code Debug Visualizer.
+        
+        Args:
+            filename: Output filename (without extension)
+            layout_engine: Graphviz layout engine:
+                - "dot" (default): Hierarchical, good for directed graphs
+                - "neato": Spring model, good for undirected graphs
+                - "fdp": Force-directed placement
+                - "sfdp": Scalable force-directed (best for large graphs)
+                - "circo": Circular layout
+                - "twopi": Radial layout
+            format: Output format ("svg", "png", "pdf")
+            show_impedance: Show impedance values on lines
+            show_voltage: Show voltage levels on buses
+        """
+        if not GRAPHVIZ_AVAILABLE:
+            print("[ERROR] Graphviz not available. Install with: pip install graphviz")
+            return
+        
+        print(f"\n[GRAPHVIZ] Using {layout_engine} layout engine (professional automatic layout)...")
+        
+        # Build structure
+        phs_map = self.build_phs_structure()
+        
+        # Create Graphviz graph
+        graph = graphviz.Graph(
+            name='power_system',
+            engine=layout_engine,
+            graph_attr={
+                'rankdir': 'LR',  # Left to right
+                'ranksep': '1.5',  # Spacing between ranks
+                'nodesep': '1.0',  # Spacing between nodes
+                'splines': 'true',  # Curved edges
+                'overlap': 'false',  # Prevent node overlap
+                'bgcolor': '#fafafa',
+                'fontname': 'Arial',
+                'pad': '0.5',  # Padding around graph
+            },
+            node_attr={
+                'fontname': 'Arial',
+                'fontsize': '11',
+                'margin': '0.2,0.1',
+            },
+            edge_attr={
+                'fontname': 'Arial',
+                'fontsize': '9',
+            }
+        )
+        
+        # Add buses as nodes
+        for bus in self.data.get('Bus', []):
+            bus_idx = bus['idx']
+            bus_name = str(bus['name'])
+            vn = bus['Vn']
+            
+            # Color by voltage level
+            if vn < 100:
+                color = '#1565c0'
+                fillcolor = '#e3f2fd'
+            else:
+                color = '#f57f17'
+                fillcolor = '#fff9c4'
+            
+            label = f"{bus_name}"
+            if show_voltage:
+                label += f"\\n{vn:.0f} kV"
+            
+            graph.node(
+                str(bus_idx),
+                label=label,
+                shape='box',
+                style='filled,rounded',
+                fillcolor=fillcolor,
+                color=color,
+                penwidth='2.5'
+            )
+        
+        # Add generators as separate nodes connected to buses
+        for gp in phs_map["storage_ports"]:
+            gen_id = gp["id"]
+            bus_idx = gp["at_bus"]
+            
+            label = f"{gen_id}\\nM={gp['M']:.1f}\\n{gp['Sn']:.0f} MVA"
+            
+            graph.node(
+                f"gen_{gen_id}",
+                label=label,
+                shape='ellipse',
+                style='filled',
+                fillcolor='#e3f2fd',
+                color='#1976d2',
+                penwidth='2.5',
+                width='1.2',
+                height='0.8'
+            )
+            
+            graph.edge(
+                str(bus_idx),
+                f"gen_{gen_id}",
+                color='#1976d2',
+                penwidth='2.0'
+            )
+        
+        # Add exciters as small nodes
+        for ep in phs_map["exciter_ports"]:
+            exc_id = ep["id"]
+            gen_idx = ep["syn"]
+            model = ep.get('model', 'AVR')
+            
+            graph.node(
+                f"exc_{exc_id}",
+                label=f"{model}",
+                shape='box',
+                style='filled,rounded',
+                fillcolor='#fff3e0',
+                color='#ff6f00',
+                penwidth='2.0',
+                width='0.8',
+                height='0.4'
+            )
+            
+            graph.edge(
+                f"gen_G{gen_idx}",
+                f"exc_{exc_id}",
+                color='#ff6f00',
+                style='dashed',
+                penwidth='1.5'
+            )
+        
+        # Add governors as small nodes
+        for gp in phs_map["governor_ports"]:
+            gov_id = gp["id"]
+            gen_idx = gp["syn"]
+            model = gp.get('model', 'GOV')
+            
+            graph.node(
+                f"gov_{gov_id}",
+                label=f"{model}",
+                shape='box',
+                style='filled,rounded',
+                fillcolor='#e8f5e9',
+                color='#2e7d32',
+                penwidth='2.0',
+                width='0.8',
+                height='0.4'
+            )
+            
+            graph.edge(
+                f"gen_G{gen_idx}",
+                f"gov_{gov_id}",
+                color='#2e7d32',
+                style='dashed',
+                penwidth='1.5'
+            )
+        
+        # Add loads as triangle nodes
+        for lp in phs_map["load_ports"]:
+            load_id = lp["id"]
+            bus_idx = lp["at_bus"]
+            
+            label = f"Load\\nP={lp['p0']:.2f}\\nQ={lp['q0']:.2f}"
+            
+            graph.node(
+                f"load_{load_id}",
+                label=label,
+                shape='triangle',
+                style='filled',
+                fillcolor='#ffebee',
+                color='#d32f2f',
+                penwidth='2.0',
+                width='1.0',
+                height='0.8'
+            )
+            
+            graph.edge(
+                str(bus_idx),
+                f"load_{load_id}",
+                color='#d32f2f',
+                penwidth='2.0'
+            )
+        
+        # Add transmission lines (coupling ports)
+        line_counts = defaultdict(int)
+        for cp in phs_map["coupling_ports"]:
+            b1, b2 = cp["buses"]
+            key = tuple(sorted([b1, b2]))
+            line_counts[key] += 1
+            
+            label = ""
+            if show_impedance:
+                label = f"X={cp['x']:.4f}"
+            
+            graph.edge(
+                str(b1),
+                str(b2),
+                label=label,
+                color='#424242',
+                penwidth='2.5',
+                style='solid'
+            )
+        
+        # Add transformers (scaling ports)
+        for sp in phs_map["scaling_ports"]:
+            b1, b2 = sp["buses"]
+            
+            label = ""
+            if show_impedance:
+                label = f"X={sp['x']:.4f}\\n{sp['Vn1']:.0f}→{sp['Vn2']:.0f}kV"
+            
+            graph.edge(
+                str(b1),
+                str(b2),
+                label=label,
+                color='#7b1fa2',
+                penwidth='3.0',
+                style='dashed'
+            )
+        
+        # Render the graph
+        try:
+            output_path = graph.render(filename, format=format, cleanup=True)
+            print(f"[COMPLETE] Graphviz visualization generated: {output_path}")
+            print(f"[INFO] Layout engine: {layout_engine} | Format: {format}")
+            return output_path
+        except Exception as e:
+            print(f"[ERROR] Failed to render graph: {e}")
+            print("[TIP] Make sure Graphviz is installed: https://graphviz.org/download/")
+            return None
+
     def build_phs_structure(self):
         """Build PHS interconnection structure with all component types."""
         print("\n" + "="*30 + " PHS INTERCONNECTION MAPPING " + "="*30)
@@ -539,42 +885,47 @@ class AutoPHSVisualizer:
     def _find_non_overlapping_position(self, base_pos, width, height, avoid_regions):
         """Find a position that doesn't overlap with existing components."""
         x, y = base_pos
-        pad = self.clearance_padding if self.strict_component_clearance else 0.0
+        pad = self.clearance_padding if self.strict_component_clearance else 5.0
         
-        # Define potential positions in order of preference
-        offsets = [
-            (0, 0),  # Preferred position
-            (0, height + 20), (0, -height - 20),  # Above/below
-            (width + 20, 0), (-width - 20, 0),    # Left/right
-            (width + 20, height + 20), (-width - 20, height + 20),  # Diagonal
-            (width + 20, -height - 20), (-width - 20, -height - 20)
-        ]
+        # First, check if base position is clear
+        test_region = (x - width/2 - pad, y - height/2 - pad,
+                      x + width/2 + pad, y + height/2 + pad)
+        if not self._overlaps_with_regions(test_region, avoid_regions):
+            return base_pos
         
-        for dx, dy in offsets:
-            test_pos = (x + dx, y + dy)
-            test_region = (test_pos[0] - width/2 - pad, test_pos[1] - height/2 - pad,
-                          test_pos[0] + width/2 + pad, test_pos[1] + height/2 + pad)
-            
-            if not self._overlaps_with_regions(test_region, avoid_regions):
-                return test_pos
-
-        # For strict clearance, try a spiral search with expanding radius
+        # If strict clearance is enabled, do spiral search
         if self.strict_component_clearance:
-            ring_step = max(width, height) * 0.6 + 10
-            angle_steps = 12
-            max_rings = 10
+            ring_step = max(width, height) * 0.8 + 15
+            angle_steps = 16  # Increased for finer granularity
+            max_rings = 8
             for ring in range(1, max_rings + 1):
                 radius = ring * ring_step
                 for k in range(angle_steps):
                     theta = 2 * np.pi * k / angle_steps
-                    test_pos = (x + radius * np.cos(theta), y + radius * np.sin(theta))
-                    test_region = (test_pos[0] - width/2 - pad, test_pos[1] - height/2 - pad,
-                                  test_pos[0] + width/2 + pad, test_pos[1] + height/2 + pad)
+                    test_x = x + radius * np.cos(theta)
+                    test_y = y + radius * np.sin(theta)
+                    test_region = (test_x - width/2 - pad, test_y - height/2 - pad,
+                                  test_x + width/2 + pad, test_y + height/2 + pad)
                     if not self._overlaps_with_regions(test_region, avoid_regions):
-                        return test_pos
-                
-        # If no non-overlapping position found, return position with maximum offset
-        return (x + width + 40, y)
+                        return (test_x, test_y)
+        else:
+            # Simple offset strategy - try common directions
+            step = max(width, height) + 25
+            offsets = [
+                (0, step), (0, -step),      # Up/Down
+                (step, 0), (-step, 0),       # Right/Left
+                (step, step), (-step, step), # Diagonals
+                (step, -step), (-step, -step)
+            ]
+            for dx, dy in offsets:
+                test_x, test_y = x + dx, y + dy
+                test_region = (test_x - width/2 - pad, test_y - height/2 - pad,
+                              test_x + width/2 + pad, test_y + height/2 + pad)
+                if not self._overlaps_with_regions(test_region, avoid_regions):
+                    return (test_x, test_y)
+        
+        # Fallback: return position with safe offset
+        return (x + width + 50, y + height + 50)
 
     def _overlaps_with_regions(self, region1, regions_list):
         """Check if region1 overlaps with any region in regions_list."""
@@ -623,23 +974,37 @@ class AutoPHSVisualizer:
                 bus_clearance=bus_clearance
             )
 
-        # Normalize coordinates to fit SVG with margins
+        # Normalize coordinates to fit SVG with margins - preserve aspect ratio
         if coords:
             all_x = [c[0] for c in coords.values()]
             all_y = [c[1] for c in coords.values()]
             min_x, max_x = min(all_x), max(all_x)
             min_y, max_y = min(all_y), max(all_y)
 
-            margin = 150
-            scale_x = (svg_width - 2 * margin) / (max_x - min_x + 1)
-            scale_y = (svg_height - 2 * margin - 100) / (max_y - min_y + 1)  # Extra space for legend
-
+            # Generous margins for labels and components
+            margin = 200
+            legend_space = 120
+            
+            # Calculate range with minimum to avoid division by zero
+            x_range = max(max_x - min_x, 100)
+            y_range = max(max_y - min_y, 100)
+            
+            # Calculate scales but preserve aspect ratio to avoid distortion
+            available_width = svg_width - 2 * margin
+            available_height = svg_height - 2 * margin - legend_space
+            
+            scale_x = available_width / x_range
+            scale_y = available_height / y_range
+            
+            # Use the smaller scale to preserve aspect ratio (avoid stretching)
+            scale = min(scale_x, scale_y) * 0.8  # 0.8 factor for extra breathing room
+            
             for bus_idx in coords:
                 x, y = coords[bus_idx]
-                coords[bus_idx] = (
-                    margin + (x - min_x) * scale_x,
-                    margin + 50 + (y - min_y) * scale_y
-                )
+                # Center the layout in available space
+                x_centered = (x - min_x - x_range/2) * scale + svg_width/2
+                y_centered = (y - min_y - y_range/2) * scale + svg_height/2 - legend_space/2
+                coords[bus_idx] = (x_centered, y_centered)
 
         # Start SVG
         svg = [f'<svg width="{svg_width}" height="{svg_height}" xmlns="http://www.w3.org/2000/svg">']
@@ -741,7 +1106,8 @@ class AutoPHSVisualizer:
 
     def draw_electrical_distance(self, filename="electrical_distance.svg", svg_width=1600, svg_height=1000,
                                  spacing_factor=1.0, node_size_factor=1.0, angle_spread=True,
-                                 strict_component_clearance=False, bus_clearance=40.0):
+                                 strict_component_clearance=False, bus_clearance=40.0,
+                                 distance_scale='log', min_distance=0.02, max_distance=1.0):
         """
         Generate SVG visualization where bus positions are determined by MDS
         on the electrical distance matrix, and lines are color-coded by impedance.
@@ -759,14 +1125,23 @@ class AutoPHSVisualizer:
             angle_spread: Spread incident edges around high-degree buses (default=True)
             strict_component_clearance: Enforce no overlaps between all components (default=False)
             bus_clearance: Extra spacing between buses (default=40.0)
+            distance_scale: Distance scaling method - 'linear', 'log' (default), or 'sqrt'
+            min_distance: Minimum distance clamp (default=0.02 for log scale, prevents buses too close)
+            max_distance: Maximum distance clamp (default=1.0 for log scale, prevents buses too far)
+                         Note: For 'linear' scale use larger values (0.01-0.1 min, 1.0-5.0 max)
+                               For 'log' scale use 0.02-0.05 min, 0.8-1.5 max
+                               For 'sqrt' scale use 0.01-0.03 min, 0.5-1.0 max
         """
         print(f"\n[ELECTRICAL DISTANCE] Computing MDS layout from impedance matrix...")
+        print(f"  Distance scaling: {distance_scale} | Min: {min_distance} | Max: {max_distance}")
 
         # Build structure
         phs_map = self.build_phs_structure()
 
-        # MDS layout with spacing factor
-        coords, buses, dist_matrix = self.compute_layout_mds(width=svg_width, height=svg_height, spacing_factor=spacing_factor)
+        # MDS layout with spacing factor and distance scaling
+        coords, buses, dist_matrix = self.compute_layout_mds(
+            width=svg_width, height=svg_height, spacing_factor=spacing_factor,
+            scale_method=distance_scale, min_distance=min_distance, max_distance=max_distance)
 
         if not coords:
             print("[ERROR] No buses found.")
@@ -863,7 +1238,7 @@ class AutoPHSVisualizer:
                     # Transmission line: solid line
                     svg.append(f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}" stroke="{color}" stroke-width="{thickness:.1f}" opacity="0.8"/>')
 
-                # Impedance label at midpoint
+                # Impedance label at midpoint with perpendicular offset and white background
                 mid_x = (x1 + x2) / 2
                 mid_y = (y1 + y2) / 2
                 angle = np.degrees(np.arctan2(dy, dx))
@@ -871,9 +1246,19 @@ class AutoPHSVisualizer:
                     angle -= 180
                 elif angle < -90:
                     angle += 180
+                
+                # Place label perpendicular to line for better readability
+                if length > 0:
+                    perp_x = -dy / length
+                    perp_y = dx / length
+                else:
+                    perp_x, perp_y = 0, 1
+                label_offset = 12 + offset  # Combine parallel and perpendicular offsets
+                label_x = mid_x + perp_x * label_offset
+                label_y = mid_y + perp_y * label_offset
 
                 label = f"|Z|={z_mag:.4f}"
-                svg.append(f'<text x="{mid_x:.1f}" y="{mid_y - 6 - offset:.1f}" font-family="Arial" font-size="8" fill="{color}" text-anchor="middle" font-weight="bold" transform="rotate({angle:.1f} {mid_x:.1f} {mid_y - 6 - offset:.1f})">{label}</text>')
+                svg.append(f'<text x="{label_x:.1f}" y="{label_y:.1f}" font-family="Arial" font-size="8" fill="{color}" text-anchor="middle" font-weight="bold" stroke="white" stroke-width="2.5" paint-order="stroke" transform="rotate({angle:.1f} {label_x:.1f} {label_y:.1f})">{label}</text>')
 
                 drawn_connections.add(conn_key)
 
@@ -999,8 +1384,14 @@ class AutoPHSVisualizer:
         # Circle node with size factor
         bus_radius = 16 * node_size_factor
         svg.append(f'<circle cx="{pos[0]:.1f}" cy="{pos[1]:.1f}" r="{bus_radius:.1f}" fill="{fill}" stroke="{stroke}" stroke-width="{2.5*node_size_factor:.1f}"/>')
-        svg.append(f'<text x="{pos[0]:.1f}" y="{pos[1]+4*node_size_factor:.1f}" font-family="Arial" font-size="{9*node_size_factor:.0f}" font-weight="bold" text-anchor="middle" fill="{stroke}">{bus_name}</text>')
-        svg.append(f'<text x="{pos[0]:.1f}" y="{pos[1]+28*node_size_factor:.1f}" font-family="Arial" font-size="{8*node_size_factor:.0f}" fill="#757575" text-anchor="middle">{vn:.0f}kV</text>')
+        
+        # Position bus name ABOVE the circle with white background to avoid overlap
+        name_y = pos[1] - bus_radius - 5
+        svg.append(f'<text x="{pos[0]:.1f}" y="{name_y:.1f}" font-family="Arial" font-size="{10*node_size_factor:.0f}" font-weight="bold" text-anchor="middle" stroke="white" stroke-width="3" paint-order="stroke" fill="{stroke}">{bus_name}</text>')
+        
+        # Position voltage label BELOW the circle with white background
+        voltage_y = pos[1] + bus_radius + 14*node_size_factor
+        svg.append(f'<text x="{pos[0]:.1f}" y="{voltage_y:.1f}" font-family="Arial" font-size="{8*node_size_factor:.0f}" fill="#757575" text-anchor="middle" stroke="white" stroke-width="3" paint-order="stroke">{vn:.0f}kV</text>')
 
     def _draw_legend(self, svg, y, width):
         """Draw legend at bottom of SVG."""
@@ -1071,26 +1462,28 @@ class AutoPHSVisualizer:
             x_eq = 1 / sum(1/l['x'] for l in lines)
             label = f"{num_lines}x, X_eq={x_eq:.4f}"
 
-        # Rotate label to follow line and avoid overlap
+        # Rotate label to follow line (keep text readable)
         angle = np.degrees(np.arctan2(dy, dx))
         if angle > 90:
             angle -= 180
         elif angle < -90:
             angle += 180
             
-        # Adjust label position to avoid overlap with components
-        label_offset = 15  # Increased from 8 for better clearance
-        label_y = mid_y - label_offset
+        # Place label perpendicular to line to minimize overlap
+        # Use perpendicular offset instead of parallel offset
+        perp_offset = 12  # Perpendicular distance from line
+        if length > 0:
+            perp_x = -dy / length  # Perpendicular direction
+            perp_y = dx / length
+        else:
+            perp_x, perp_y = 0, 1
+            
+        # Position label above line (perpendicular offset)
+        label_x = mid_x + perp_x * perp_offset
+        label_y = mid_y + perp_y * perp_offset
         
-        # Check if label would overlap with occupied regions and adjust
-        label_region = (mid_x - 30, label_y - 8, mid_x + 30, label_y + 8)
-        if self._overlaps_with_regions(label_region, self.occupied_regions):
-            label_y = mid_y + label_offset  # Try below the line
-            label_region = (mid_x - 30, label_y - 8, mid_x + 30, label_y + 8)
-            if self._overlaps_with_regions(label_region, self.occupied_regions):
-                label_y = mid_y + 25  # Move further away
-
-        svg.append(f'<text x="{mid_x:.1f}" y="{label_y:.1f}" font-family="Arial" font-size="9" fill="#616161" text-anchor="middle" transform="rotate({angle:.1f} {mid_x:.1f} {label_y:.1f})">{label}</text>')
+        # Add white background to label for readability
+        svg.append(f'<text x="{label_x:.1f}" y="{label_y:.1f}" font-family="Arial" font-size="9" fill="#616161" text-anchor="middle" stroke="white" stroke-width="3" paint-order="stroke" transform="rotate({angle:.1f} {label_x:.1f} {label_y:.1f})">{label}</text>')
 
     def _draw_transformer(self, svg, p1, p2, sp):
         """Draw transformer symbol."""
@@ -1113,8 +1506,16 @@ class AutoPHSVisualizer:
         svg.append(f'<circle cx="{mid_x-ux*8:.1f}" cy="{mid_y-uy*8:.1f}" r="10" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2"/>')
         svg.append(f'<circle cx="{mid_x+ux*8:.1f}" cy="{mid_y+uy*8:.1f}" r="10" fill="#f3e5f5" stroke="#7b1fa2" stroke-width="2"/>')
 
-        # Label
-        svg.append(f'<text x="{mid_x:.1f}" y="{mid_y+25:.1f}" font-family="Arial" font-size="8" fill="#7b1fa2" text-anchor="middle">X={sp["x"]}</text>')
+        # Label with white background for readability
+        # Perpendicular offset for better placement
+        if length > 0:
+            perp_x = -dy / length
+            perp_y = dx / length
+        else:
+            perp_x, perp_y = 0, 1
+        label_x = mid_x + perp_y * 22  # Offset perpendicular to line
+        label_y = mid_y - perp_x * 22
+        svg.append(f'<text x="{label_x:.1f}" y="{label_y:.1f}" font-family="Arial" font-size="9" fill="#7b1fa2" text-anchor="middle" stroke="white" stroke-width="3" paint-order="stroke">X={sp["x"]:.3f}</text>')
 
     def _draw_generator_with_avoidance(self, svg, bus_pos, gp, index, total, all_coords, bus_requirements, spacing_factor=1.0, node_size_factor=1.0):
         """Draw generator with collision avoidance and return its position."""
@@ -1152,18 +1553,18 @@ class AutoPHSVisualizer:
         # Generator circle with size factor
         gen_circle_radius = 20 * node_size_factor
         svg.append(f'<circle cx="{gx:.1f}" cy="{gy:.1f}" r="{gen_circle_radius:.1f}" fill="#e3f2fd" stroke="#1976d2" stroke-width="{3*node_size_factor:.1f}"/>')
+        # Position generator ID INSIDE the circle (centered)
         svg.append(f'<text x="{gx:.1f}" y="{gy+5*node_size_factor:.1f}" font-family="Arial" font-size="{12*node_size_factor:.0f}" font-weight="bold" fill="#1976d2" text-anchor="middle">{gp["id"]}</text>')
 
-        # Label positioned to avoid overlap with spacing factor
-        label_offset = 40 * spacing_factor
-        label_x = gx - label_offset if gx < bus_pos[0] else gx + label_offset
+        # Label positioned BELOW the generator to avoid overlap
+        label_y_offset = 30 * node_size_factor
         label_font_size = 8 * node_size_factor
-        svg.append(f'<text x="{label_x:.1f}" y="{gy-8*node_size_factor:.1f}" font-family="Arial" font-size="{label_font_size:.0f}" fill="#1565c0" text-anchor="middle">M={gp["M"]}</text>')
-        svg.append(f'<text x="{label_x:.1f}" y="{gy+3*node_size_factor:.1f}" font-family="Arial" font-size="{label_font_size:.0f}" fill="#1565c0" text-anchor="middle">{gp["Sn"]:.0f}MVA</text>')
+        svg.append(f'<text x="{gx:.1f}" y="{gy+label_y_offset:.1f}" font-family="Arial" font-size="{label_font_size:.0f}" fill="#1565c0" text-anchor="middle">M={gp["M"]}</text>')
+        svg.append(f'<text x="{gx:.1f}" y="{gy+label_y_offset+10*node_size_factor:.1f}" font-family="Arial" font-size="{label_font_size:.0f}" fill="#1565c0" text-anchor="middle">{gp["Sn"]:.0f}MVA</text>')
         
-        # Register label region
-        label_region_width = 25 * spacing_factor * node_size_factor
-        self.occupied_regions.append((label_x - label_region_width, gy - 15*node_size_factor, label_x + label_region_width, gy + 10*node_size_factor))
+        # Register label region below generator
+        label_region_width = 30 * node_size_factor
+        self.occupied_regions.append((gx - label_region_width, gy + 20*node_size_factor, gx + label_region_width, gy + 50*node_size_factor))
 
         return (gx, gy)
 
@@ -1189,9 +1590,16 @@ class AutoPHSVisualizer:
         # Register occupied region with size factor
         self.occupied_regions.append((ex - exciter_width/2, ey - exciter_height/2, ex + exciter_width/2, ey + exciter_height/2))
 
-        svg.append(f'<line x1="{gx:.1f}" y1="{gy-20*node_size_factor:.1f}" x2="{ex:.1f}" y2="{ey+10*node_size_factor:.1f}" stroke="#ff6f00" stroke-width="{1.5*node_size_factor:.1f}" stroke-dasharray="3,2"/>')
+        # Calculate connection point on generator circle edge (dynamic based on exciter position)
+        gen_radius = 20 * node_size_factor
+        angle_to_exciter = np.arctan2(ey - gy, ex - gx)
+        gen_conn_x = gx + gen_radius * np.cos(angle_to_exciter)
+        gen_conn_y = gy + gen_radius * np.sin(angle_to_exciter)
+        
+        svg.append(f'<line x1="{gen_conn_x:.1f}" y1="{gen_conn_y:.1f}" x2="{ex:.1f}" y2="{ey:.1f}" stroke="#ff6f00" stroke-width="{1.5*node_size_factor:.1f}" stroke-dasharray="3,2"/>')
         svg.append(f'<rect x="{ex-18*node_size_factor:.1f}" y="{ey-10*node_size_factor:.1f}" width="{36*node_size_factor:.1f}" height="{20*node_size_factor:.1f}" fill="#fff3e0" stroke="#ff6f00" stroke-width="{2*node_size_factor:.1f}" rx="3"/>')
-        svg.append(f'<text x="{ex:.1f}" y="{ey+4*node_size_factor:.1f}" font-family="Arial" font-size="{7*node_size_factor:.0f}" font-weight="bold" fill="#e65100" text-anchor="middle">{model}</text>')
+        # Position model text slightly ABOVE center to avoid line overlap
+        svg.append(f'<text x="{ex:.1f}" y="{ey+2*node_size_factor:.1f}" font-family="Arial" font-size="{7*node_size_factor:.0f}" font-weight="bold" fill="#e65100" text-anchor="middle">{model}</text>')
         
         return (ex, ey)
 
@@ -1218,9 +1626,16 @@ class AutoPHSVisualizer:
         # Register occupied region with size factor
         self.occupied_regions.append((govx - governor_width/2, govy - governor_height/2, govx + governor_width/2, govy + governor_height/2))
 
-        svg.append(f'<line x1="{gx:.1f}" y1="{gy+20*node_size_factor:.1f}" x2="{govx:.1f}" y2="{govy-10*node_size_factor:.1f}" stroke="#2e7d32" stroke-width="{1.5*node_size_factor:.1f}" stroke-dasharray="3,2"/>')
+        # Calculate connection point on generator circle edge (dynamic based on governor position)
+        gen_radius = 20 * node_size_factor
+        angle_to_governor = np.arctan2(govy - gy, govx - gx)
+        gen_conn_x = gx + gen_radius * np.cos(angle_to_governor)
+        gen_conn_y = gy + gen_radius * np.sin(angle_to_governor)
+        
+        svg.append(f'<line x1="{gen_conn_x:.1f}" y1="{gen_conn_y:.1f}" x2="{govx:.1f}" y2="{govy:.1f}" stroke="#2e7d32" stroke-width="{1.5*node_size_factor:.1f}" stroke-dasharray="3,2"/>')
         svg.append(f'<rect x="{govx-18*node_size_factor:.1f}" y="{govy-10*node_size_factor:.1f}" width="{36*node_size_factor:.1f}" height="{20*node_size_factor:.1f}" fill="#e8f5e9" stroke="#2e7d32" stroke-width="{2*node_size_factor:.1f}" rx="3"/>')
-        svg.append(f'<text x="{govx:.1f}" y="{govy+4*node_size_factor:.1f}" font-family="Arial" font-size="{7*node_size_factor:.0f}" font-weight="bold" fill="#1b5e20" text-anchor="middle">{model}</text>')
+        # Position model text slightly ABOVE center to avoid line overlap
+        svg.append(f'<text x="{govx:.1f}" y="{govy+2*node_size_factor:.1f}" font-family="Arial" font-size="{7*node_size_factor:.0f}" font-weight="bold" fill="#1b5e20" text-anchor="middle">{model}</text>')
 
     def _draw_load_with_avoidance(self, svg, bus_pos, lp, bus_requirements, spacing_factor=1.0, node_size_factor=1.0):
         """Draw load at bus with collision avoidance."""
@@ -1243,10 +1658,12 @@ class AutoPHSVisualizer:
 
         svg.append(f'<line x1="{bus_pos[0]:.1f}" y1="{bus_pos[1]:.1f}" x2="{lx:.1f}" y2="{ly-12*node_size_factor:.1f}" stroke="#d32f2f" stroke-width="{2*node_size_factor:.1f}"/>')
         svg.append(f'<polygon points="{lx:.1f},{ly+12*node_size_factor:.1f} {lx-12*node_size_factor:.1f},{ly-8*node_size_factor:.1f} {lx+12*node_size_factor:.1f},{ly-8*node_size_factor:.1f}" fill="#ffebee" stroke="#d32f2f" stroke-width="{2*node_size_factor:.1f}"/>')
-        svg.append(f'<text x="{lx:.1f}" y="{ly+25*node_size_factor:.1f}" font-family="Arial" font-size="{8*node_size_factor:.0f}" fill="#c62828" text-anchor="middle">P={lp["p0"]}</text>')
+        # Position load label BELOW the load triangle with white background
+        label_y = ly + 24*node_size_factor
+        svg.append(f'<text x="{lx:.1f}" y="{label_y:.1f}" font-family="Arial" font-size="{8*node_size_factor:.0f}" fill="#c62828" text-anchor="middle" stroke="white" stroke-width="3" paint-order="stroke">P={lp["p0"]:.2f}</text>')
 
     def _draw_bus(self, svg, pos, bus, node_size_factor=1.0):
-        """Draw bus bar."""
+        """Draw bus bar with clear, non-overlapping labels."""
         bus_name = str(bus['name'])
         vn = bus['Vn']
 
@@ -1256,5 +1673,11 @@ class AutoPHSVisualizer:
         bar_width = 8 * node_size_factor
         bar_height = 50 * node_size_factor
         svg.append(f'<rect x="{pos[0]-bar_width/2:.1f}" y="{pos[1]-bar_height/2:.1f}" width="{bar_width:.1f}" height="{bar_height:.1f}" fill="{bar_color}" rx="2"/>')
-        svg.append(f'<text x="{pos[0]:.1f}" y="{pos[1]-bar_height/2-7:.1f}" font-family="Arial" font-size="{11*node_size_factor:.0f}" font-weight="bold" text-anchor="middle">{bus_name}</text>')
-        svg.append(f'<text x="{pos[0]:.1f}" y="{pos[1]+bar_height/2+15*node_size_factor:.1f}" font-family="Arial" font-size="{9*node_size_factor:.0f}" fill="#757575" text-anchor="middle">{vn:.0f}kV</text>')
+        
+        # Bus name above the bar with white background
+        name_y = pos[1] - bar_height/2 - 7
+        svg.append(f'<text x="{pos[0]:.1f}" y="{name_y:.1f}" font-family="Arial" font-size="{11*node_size_factor:.0f}" font-weight="bold" text-anchor="middle" stroke="white" stroke-width="3" paint-order="stroke" fill="{bar_color}">{bus_name}</text>')
+        
+        # Voltage label below the bar with white background
+        voltage_y = pos[1] + bar_height/2 + 15*node_size_factor
+        svg.append(f'<text x="{pos[0]:.1f}" y="{voltage_y:.1f}" font-family="Arial" font-size="{9*node_size_factor:.0f}" fill="#757575" text-anchor="middle" stroke="white" stroke-width="3" paint-order="stroke">{vn:.0f}kV</text>')
