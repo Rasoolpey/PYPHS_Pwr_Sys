@@ -1,0 +1,846 @@
+\documentclass[12pt,a4paper]{article}
+
+% ============================================================
+% Packages
+% ============================================================
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{float}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{hyperref}
+\usepackage{cleveref}
+% algorithm2e for pseudocode (more compatible than algorithmicx)
+\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{subcaption}
+\usepackage{enumitem}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc}
+
+% ============================================================
+% Formatting
+% ============================================================
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!70!black,
+    citecolor=green!50!black,
+    urlcolor=blue!60!black
+}
+
+\lstset{
+    language=Python,
+    basicstyle=\small\ttfamily,
+    keywordstyle=\color{blue!70!black}\bfseries,
+    commentstyle=\color{green!50!black}\itshape,
+    stringstyle=\color{red!60!black},
+    frame=single,
+    breaklines=true,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    captionpos=b
+}
+
+\newcommand{\pder}[2]{\frac{\partial #1}{\partial #2}}
+\newcommand{\dder}[2]{\frac{\mathrm{d} #1}{\mathrm{d} #2}}
+\newcommand{\vect}[1]{\bm{#1}}
+\newcommand{\mat}[1]{\mathbf{#1}}
+\newcommand{\pu}{\,\text{pu}}
+\newcommand{\abs}[1]{\left| #1 \right|}
+
+% ============================================================
+\title{A Modular Port-Hamiltonian Framework for Power System\\Dynamic Simulation: Methodology and Implementation}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Port-Hamiltonian System Framework}
+\label{sec:phs_framework}
+% ============================================================
+
+\subsection{General Port-Hamiltonian Formulation}
+
+The Port-Hamiltonian Systems (PHS) framework provides an energy-based modelling paradigm that unifies storage, dissipation, and external interaction through the concept of power ports~\cite{vanderschaft2000}. A finite-dimensional PHS is described by
+\begin{equation}
+\label{eq:phs_general}
+\begin{bmatrix} \dot{\vect{x}} \\ \vect{w} \\ \vect{y} \end{bmatrix}
+=
+\begin{bmatrix}
+\mat{J}_{xx} - \mat{R}_{xx} & \mat{J}_{xw} - \mat{R}_{xw} & \mat{G}_x \\
+\mat{J}_{wx} - \mat{R}_{wx} & \mat{J}_{ww} - \mat{R}_{ww} & \mat{G}_w \\
+-\mat{G}_x^\top & -\mat{G}_w^\top & \mat{0}
+\end{bmatrix}
+\begin{bmatrix} \nabla_{\vect{x}} \mathcal{H} \\ \vect{z}(\vect{w}) \\ \vect{u} \end{bmatrix},
+\end{equation}
+where $\vect{x} \in \mathbb{R}^n$ is the state vector, $\mathcal{H}(\vect{x})$ is the Hamiltonian (total stored energy), $\vect{u}$ and $\vect{y}$ are input and output port variables satisfying $\vect{y}^\top \vect{u} = P_{\text{ext}}$ (supplied power), $\vect{w}$ and $\vect{z}$ are dissipative flow--effort pairs, $\mat{J} = -\mat{J}^\top$ is the skew-symmetric interconnection matrix, and $\mat{R} = \mat{R}^\top \geq 0$ is the positive semi-definite dissipation matrix.
+
+The passivity property
+\begin{equation}
+\dder{\mathcal{H}}{t} = -\vect{z}^\top \vect{w} + \vect{y}^\top \vect{u} \leq \vect{y}^\top \vect{u}
+\end{equation}
+guarantees that the internal energy can only decrease when the external supply is zero, providing a natural Lyapunov function candidate for stability analysis.
+
+\subsection{Software Architecture}
+
+The proposed framework implements the PHS formulation through a modular, component-based software architecture consisting of four principal layers:
+
+\begin{enumerate}[label=(\roman*)]
+    \item \textbf{Core Layer} (\texttt{pyphs\_core.py}): A standalone symbolic PHS engine managing state variables $\vect{x}$, dissipative variables $\vect{w}$, dissipation functions $\vect{z}$, input--output ports $(\vect{u}, \vect{y})$, and the Hamiltonian $\mathcal{H}$. The \texttt{DynamicsCore} class extends this with numerical dynamics capability, providing the interface $\dot{\vect{x}} = f(\vect{x}, \vect{u}, \boldsymbol{\theta})$ where $\boldsymbol{\theta}$ denotes component parameters.
+
+    \item \textbf{Component Layer} (\texttt{components/}): Individual machine models (generators, exciters, governors, renewable energy converters) each implemented as a \texttt{DynamicsCore} with a dynamics function, output function, initialization function, and parameter metadata. Components are self-describing through attributes: \texttt{n\_states}, \texttt{model\_name}, \texttt{component\_type}.
+
+    \item \textbf{System Assembly Layer} (\texttt{system\_builder.py}, \texttt{component\_factory.py}): Reads JSON configuration files specifying bus data, line parameters, generator models, and control equipment. A factory pattern dynamically instantiates components, enabling plug-and-play model substitution without code modification.
+
+    \item \textbf{Simulation Layer} (\texttt{system\_coordinator.py}, \texttt{fault\_sim\_modular.py}, \texttt{power\_flow.py}): Handles network construction (Ybus), Kron reduction, Park transformations, iterative network solution, AC power flow, equilibrium initialization, and time-domain integration.
+\end{enumerate}
+
+The entire system is configured through JSON files with no hardcoded topology, enabling users to define arbitrary multi-machine systems by specifying bus, line, generator, exciter, and governor data declaratively.
+
+
+% ============================================================
+\section{Synchronous Generator Model}
+\label{sec:genrou}
+% ============================================================
+
+\subsection{GENROU: Round-Rotor Synchronous Machine}
+
+The sixth-order round-rotor model (GENROU) represents the electromechanical dynamics of synchronous generators. The state vector is
+\begin{equation}
+\vect{x}_g = \begin{bmatrix} \delta & p & \psi_d & \psi_q & \psi_f & \psi_{kd} & \psi_{kq} \end{bmatrix}^\top,
+\end{equation}
+where $\delta$ is the rotor angle (rad), $p = M\omega$ is the angular momentum (with $\omega$ in per-unit), $\psi_d$ and $\psi_q$ are the stator flux linkages in the $d$- and $q$-axes, $\psi_f$ is the field winding flux, $\psi_{kd}$ and $\psi_{kq}$ are damper winding fluxes.
+
+\subsubsection{Mechanical Dynamics}
+
+The swing equation in Port-Hamiltonian form separates energy storage (rotor inertia) from dissipation (damping):
+\begin{align}
+\dot{\delta} &= \omega_b (\omega - 1) \label{eq:gen_delta} \\
+\dot{p} &= T_m - T_e - D(\omega - 1) \label{eq:gen_swing}
+\end{align}
+where $\omega_b = 2\pi f_0$ is the base angular frequency, $T_m$ is the mechanical torque from the governor, $T_e = V_d I_d + V_q I_q$ is the electrical torque, $D$ is the damping coefficient, and the per-unit speed is recovered as $\omega = p/M$ with the inertia constant $M = 2H \cdot S_n/S_{\text{sys}}$.
+
+The Hamiltonian for the mechanical subsystem is
+\begin{equation}
+\mathcal{H}_{\text{mech}} = \frac{p^2}{2M},
+\end{equation}
+whose gradient $\partial \mathcal{H}_{\text{mech}}/\partial p = \omega$ appears naturally in the dynamics.
+
+\subsubsection{Electromagnetic Dynamics}
+
+The stator flux dynamics, expressed in the code per-unit convention $\psi_{\text{code}} = \psi_{\text{actual}} / \omega_b$, are
+\begin{align}
+\dot{\psi}_d &= V_d + r_a I_d + \omega_b \omega \psi_q \label{eq:gen_psid} \\
+\dot{\psi}_q &= V_q + r_a I_q - \omega_b \omega \psi_d \label{eq:gen_psiq}
+\end{align}
+where $r_a$ is the armature resistance and the generator convention (current positive leaving the machine) is adopted.
+
+The rotor winding dynamics are governed by the field and damper time constants:
+\begin{align}
+\dot{\psi}_f &= \frac{E_{fd} K_{fd} - \psi_f}{T'_{d0}} \label{eq:gen_psif} \\
+\dot{\psi}_{kd} &= \frac{-\psi_{kd}}{T''_{d0}} \label{eq:gen_psikd} \\
+\dot{\psi}_{kq} &= \frac{-\psi_{kq}}{T''_{q0}} \label{eq:gen_psikq}
+\end{align}
+where $E_{fd}$ is the field voltage from the exciter, $K_{fd} = L_f / X_{ad}$ is the scaling factor relating exciter per-unit to machine flux per-unit, and $T'_{d0}$, $T''_{d0}$, $T''_{q0}$ are the open-circuit time constants.
+
+The scaling factor $K_{fd}$ is pre-computed from machine reactances:
+\begin{equation}
+K_{fd} = \frac{L_f}{X_{ad}}, \quad X_{ad} = x_d - x_l, \quad X_{fl} = \frac{X_{ad}(x'_d - x_l)}{X_{ad} - (x'_d - x_l)}, \quad L_f = X_{ad} + X_{fl}.
+\end{equation}
+
+\subsubsection{Subtransient Voltage and Network Interface}
+
+The generator interfaces with the network through the voltage-behind-reactance model. The subtransient internal voltages are computed from flux linkages:
+\begin{align}
+E''_q &= \frac{x''_d - x_l}{x'_d - x_l} \psi_f \label{eq:Eq2} \\
+E''_d &= -\frac{x''_q - x_l}{x'_q - x_l} \psi_{kq} \label{eq:Ed2}
+\end{align}
+
+The complex internal voltage in the machine frame is $\underline{E}'' = E''_d + jE''_q$, which is transformed to the system (RI) frame via the Park transformation:
+\begin{equation}
+\label{eq:park}
+\underline{E}''_{\text{sys}} = \left( E''_d \sin\delta + E''_q \cos\delta \right) + j\left( -E''_d \cos\delta + E''_q \sin\delta \right).
+\end{equation}
+
+The generator is represented in the network as an admittance $y_g = 1/(jx''_d)$ behind the subtransient voltage. The output current is $\underline{I} = y_g (\underline{E}''_{\text{sys}} - \underline{V}_t)$, which is then transformed back to the machine frame for the dynamics computation.
+
+\subsubsection{Per-Unit System}
+
+All quantities are expressed on a common system base $S_{\text{sys}}$ (typically 100~MVA). Machine parameters originally on machine base $S_n$ are converted using:
+\begin{equation}
+Z_{\text{sys}} = Z_{\text{mach}} \cdot \frac{S_{\text{sys}}}{S_n}, \quad M_{\text{sys}} = 2H \cdot \frac{S_n}{S_{\text{sys}}}.
+\end{equation}
+
+
+% ============================================================
+\section{Excitation System Models}
+\label{sec:exciters}
+% ============================================================
+
+The framework implements four IEEE-standard excitation system models, each represented as a \texttt{DynamicsCore} with its own dynamics function, output function, and initialization procedure.
+
+\subsection{EXDC2: DC Exciter Type~2}
+\label{sec:exdc2}
+
+The IEEE EXDC2 is a DC excitation system with voltage regulator, exciter with saturation feedback, and rate feedback. The state vector is
+\begin{equation}
+\vect{x}_{\text{exc}} = \begin{bmatrix} v_m & v_r & e_{fd} & x_f \end{bmatrix}^\top,
+\end{equation}
+where $v_m$ is the measured terminal voltage, $v_r$ is the voltage regulator output, $e_{fd}$ is the field voltage (exciter output), and $x_f$ is the rate feedback state.
+
+The dynamics are:
+\begin{align}
+\dot{v}_m &= \frac{V_t - v_m}{T_R} \label{eq:exdc2_vm} \\
+V_f &= \frac{K_F (e_{fd} - x_f)}{T_{F1}}, \quad V_{\text{err}} = V_{\text{ref}} - v_m - V_f \\
+\dot{v}_r &= \frac{K_A V_{\text{err}} - v_r}{T_A} \quad \text{with anti-windup: } v_r \in [V_{R,\min}, V_{R,\max}] \label{eq:exdc2_vr} \\
+\dot{e}_{fd} &= \frac{v_r - (K_E + S_E(e_{fd})) e_{fd}}{T_E} \label{eq:exdc2_efd} \\
+\dot{x}_f &= \frac{e_{fd} - x_f}{T_{F1}} \label{eq:exdc2_xf}
+\end{align}
+
+\paragraph{Saturation Function.} The quadratic saturation model is used:
+\begin{equation}
+\label{eq:saturation}
+S_E(E) = \begin{cases} 0 & \text{if } |E| \leq A \text{ or } B = 0 \\ \displaystyle\frac{B(|E| - A)^2}{|E|} & \text{otherwise} \end{cases}
+\end{equation}
+where the coefficients $A$ and $B$ are pre-computed from the IEEE standard data points $(E_1, S_{E1})$ and $(E_2, S_{E2})$:
+\begin{equation}
+A = \frac{E_1 \sqrt{S_{E2} E_2} - E_2 \sqrt{S_{E1} E_1}}{\sqrt{S_{E2} E_2} - \sqrt{S_{E1} E_1}}, \quad B = \left(\frac{\sqrt{S_{E1} E_1}}{E_1 - A}\right)^2.
+\end{equation}
+
+\paragraph{Anti-Windup Logic.} The regulator output $v_r$ is clamped to $[V_{R,\min}, V_{R,\max}]$. When at a limit and the derivative would push further into saturation, $\dot{v}_r$ is set to zero, preventing integrator windup.
+
+\paragraph{Output.} The field voltage output is simply $E_{fd} = e_{fd}$ (state index 2).
+
+\subsection{EXST1: Static Exciter Type~1}
+\label{sec:exst1}
+
+The IEEE EXST1 is a static excitation system with lead-lag compensation, input limiting, and washout rate feedback. The state vector is
+\begin{equation}
+\vect{x}_{\text{exc}} = \begin{bmatrix} v_m & v_{ll} & v_r & v_f \end{bmatrix}^\top.
+\end{equation}
+
+The signal path is:
+\begin{enumerate}
+    \item \textbf{Voltage measurement}: $\dot{v}_m = (V_t - v_m)/T_R$
+    \item \textbf{Washout feedback}: $V_{f,\text{out}} = K_F (v_r - v_f)/T_F$, \quad $\dot{v}_f = (v_r - v_f)/T_F$
+    \item \textbf{Voltage error}: $V_{\text{err}} = V_{\text{ref}} - v_m - V_{f,\text{out}}$
+    \item \textbf{Input limiter}: $v_i = \text{clip}(V_{\text{err}}, V_{I,\min}, V_{I,\max})$
+    \item \textbf{Lead-lag compensator}: $\dot{v}_{ll} = (v_i - v_{ll})/T_C$, \quad $v_{ll,\text{out}} = v_{ll} + (T_B/T_C)(v_i - v_{ll})$
+    \item \textbf{Voltage regulator}: $\dot{v}_r = (K_A v_{ll,\text{out}} - v_r)/T_A$ with anti-windup
+\end{enumerate}
+
+The output $E_{fd}$ includes dynamic field current compensation:
+\begin{equation}
+V_{R,\max}^{\text{dyn}} = V_{R,\max} - K_C \cdot X_{ad} I_{fd}, \quad E_{fd} = \text{clip}(v_r, V_{R,\min}^{\text{dyn}}, V_{R,\max}^{\text{dyn}}).
+\end{equation}
+
+\subsection{ESST3A: Static Exciter Type ST3A}
+\label{sec:esst3a}
+
+The ESST3A is the most complex excitation model implemented, featuring inner and outer voltage regulators, VE compensation with rectifier regulation, and multiple limiters. The state vector is
+\begin{equation}
+\vect{x}_{\text{exc}} = \begin{bmatrix} v_{\text{LG}} & x_{\text{LL}} & V_R & V_M & V_B \end{bmatrix}^\top.
+\end{equation}
+
+\subsubsection{VE Compensation}
+
+The VE (voltage error) compensation block computes a compensated voltage magnitude using complex phasor arithmetic:
+\begin{equation}
+\label{eq:ve_comp}
+V_E = \left| K_P e^{j\theta_P} (V_d + jV_q) + j(K_I + K_P e^{j\theta_P} X_L)(I_d + jI_q) \right|
+\end{equation}
+
+In the implementation, this is computed using explicit real and imaginary arithmetic to maintain compatibility with Numba JIT compilation:
+\begin{align}
+K_{PC,r} &= K_P \cos(\theta_P), \quad K_{PC,i} = K_P \sin(\theta_P) \\
+z_1 &= K_{PC,r} V_d - K_{PC,i} V_q + j(K_{PC,r} V_q + K_{PC,i} V_d) \\
+z_2 &= [-(K_{PC,i} X_L) + j(K_I + K_{PC,r} X_L)](I_d + jI_q) \\
+V_E &= |z_1 + z_2|
+\end{align}
+
+\subsubsection{Rectifier Regulation}
+
+The rectifier regulation function $F_{EX}$ is a piecewise function of $I_N = K_C X_{ad} I_{fd} / V_E$:
+\begin{equation}
+F_{EX}(I_N) = \begin{cases}
+1 - 0.577 I_N & 0 \leq I_N \leq 0.433 \\
+\sqrt{0.75 - I_N^2} & 0.433 < I_N \leq 0.75 \\
+1.732(1 - I_N) & 0.75 < I_N \leq 1.0 \\
+0 & I_N > 1.0
+\end{cases}
+\end{equation}
+
+The bridge voltage is $V_B = \text{clip}(V_E \cdot F_{EX}, 0, V_{B,\max})$, and the field voltage output is
+\begin{equation}
+E_{fd} = \text{clip}(V_B \cdot V_M, E_{fd,\min}, E_{fd,\max}).
+\end{equation}
+
+\subsubsection{Control Blocks}
+
+The outer regulator (voltage regulator) uses a lead-lag compensator with input limiting:
+\begin{equation}
+v_i = \text{clip}(V_{\text{ref}} - v_{\text{LG}}, V_{I,\min}, V_{I,\max})
+\end{equation}
+followed by a lead-lag block with transfer function $(1 + sT_B)/(1 + sT_C)$, and a gain/lag $K_A/(1 + sT_A)$ with output limits $[V_{R,\min}, V_{R,\max}]$.
+
+The inner regulator (feedback loop) computes $V_M = K_M (V_R - K_G E_{fd}) / (1 + sT_M)$ with limits $[V_{M,\min}, V_{M,\max}]$.
+
+\subsection{IEEEX1: IEEE Type~1 Exciter}
+\label{sec:ieeex1}
+
+The IEEEX1 model is similar to EXDC2 but includes a lead-lag compensator and voltage-dependent limits. The state vector is
+\begin{equation}
+\vect{x}_{\text{exc}} = \begin{bmatrix} v_m & v_{ll} & v_r & v_p & v_f \end{bmatrix}^\top.
+\end{equation}
+
+Key differences from EXDC2:
+\begin{itemize}
+    \item Lead-lag block $(1 + sT_C)/(1 + sT_B)$ between error signal and regulator
+    \item Voltage-dependent regulator limits: $v_{r,\max} = V_{R,\max} \cdot V_t$, $v_{r,\min} = V_{R,\min} \cdot V_t$
+    \item Speed compensation on output: $E_{fd} = v_p \cdot \omega$
+    \item Exciter block with saturation: $\dot{v}_p = (v_r - K_E v_p - S_E(v_p) v_p) / T_E$
+\end{itemize}
+
+
+% ============================================================
+\section{Governor--Turbine Models}
+\label{sec:governors}
+% ============================================================
+
+\subsection{TGOV1: Steam Turbine Governor}
+\label{sec:tgov1}
+
+The TGOV1 model represents a simplified steam turbine governor with two states:
+\begin{equation}
+\vect{x}_{\text{gov}} = \begin{bmatrix} x_1 & x_2 \end{bmatrix}^\top,
+\end{equation}
+where $x_1$ is the governor valve position and $x_2$ is the turbine power lag state.
+
+The dynamics include droop-based speed control with deadband and valve position limits:
+\begin{align}
+\omega_{\text{err}} &= \omega_{\text{ref}} - \omega, \quad \text{with deadband: } |\omega_{\text{err}}| < \epsilon \implies \omega_{\text{err}} = 0 \\
+P_{\text{gate}} &= P_{\text{ref}} + \frac{\omega_{\text{err}}}{R}, \quad P_{\text{lim}} = \text{clip}(P_{\text{gate}}, V_{\min}, V_{\max}) \\
+\dot{x}_1 &= \frac{P_{\text{lim}} - x_1}{T_1} \label{eq:tgov1_x1} \\
+\dot{x}_2 &= \frac{x_1 - x_2}{T_3} \label{eq:tgov1_x2}
+\end{align}
+
+The mechanical torque output combines lead-lag dynamics with turbine damping:
+\begin{equation}
+T_m = \frac{T_2}{T_3}(x_1 - x_2) + x_2 - D_t(\omega - 1) \label{eq:tgov1_Tm}
+\end{equation}
+
+\subsection{IEEEG1: Multi-Stage Steam Turbine Governor}
+\label{sec:ieeeg1}
+
+The IEEEG1 model represents a multi-stage steam turbine with four turbine/reheater stages. The state vector is
+\begin{equation}
+\vect{x}_{\text{gov}} = \begin{bmatrix} x_{ll} & v_{\text{pos}} & x_4 & x_5 & x_6 & x_7 \end{bmatrix}^\top,
+\end{equation}
+where $x_{ll}$ is the lead-lag filter state, $v_{\text{pos}}$ is the valve position, and $x_4$--$x_7$ represent the four turbine stages.
+
+\subsubsection{Speed Sensing and Valve Control}
+
+The lead-lag filter processes the speed deviation:
+\begin{equation}
+\dot{x}_{ll} = \frac{(\omega_{\text{ref}} - \omega) - x_{ll}}{T_1}, \quad \text{LL}_y = K\left[(\omega_{\text{ref}} - \omega) + \frac{(T_2 - T_1) x_{ll}}{T_1}\right]
+\end{equation}
+
+The valve position dynamics include rate limits and position limits:
+\begin{equation}
+v_s = \frac{\text{LL}_y + P_{\text{aux}} + P_{\text{ref}} - v_{\text{pos}}}{T_3}, \quad \dot{v}_{\text{pos}} = \text{clip}(v_s, U_C, U_O)
+\end{equation}
+subject to $v_{\text{pos}} \in [P_{\min}, P_{\max}]$ with anti-windup.
+
+\subsubsection{Turbine Stages}
+
+Four cascaded lag blocks represent the turbine and reheater stages:
+\begin{equation}
+\dot{x}_k = \frac{x_{k-1} - x_k}{T_{k+2}}, \quad k = 4, 5, 6, 7
+\end{equation}
+where $x_3 \equiv v_{\text{pos}}$ (valve position feeds the first stage).
+
+\subsubsection{Power Output}
+
+The total mechanical power is distributed across HP (high-pressure) and LP (low-pressure) outputs via normalized power fractions $K_{1n}$--$K_{8n}$:
+\begin{equation}
+P_m = \sum_{i \in \{4,5,6,7\}} (K_{2i-7,n} + K_{2i-6,n}) x_i
+\end{equation}
+where the fractions are normalized to sum to unity: $\sum_{i=1}^{8} K_{i,n} = 1$.
+
+
+% ============================================================
+\section{Renewable Energy: Type-3 Wind Turbine Model}
+\label{sec:wt3}
+% ============================================================
+
+The framework includes a comprehensive Type-3 Wind Turbine Generator (WTG) model consisting of seven interconnected sub-components, each implemented as a \texttt{DynamicsCore}. The total state vector per turbine unit comprises 21 states.
+
+\subsection{REGCA1: Renewable Generator/Converter}
+\label{sec:regca1}
+
+The REGCA1 model represents the power electronic converter as a controlled current source. The state vector is
+\begin{equation}
+\vect{x}_{\text{reg}} = \begin{bmatrix} I_p & I_q & V_{\text{filt}} \end{bmatrix}^\top,
+\end{equation}
+where $I_p$ and $I_q$ are the active and reactive current outputs, and $V_{\text{filt}}$ is a filtered terminal voltage.
+
+The dynamics implement first-order current command tracking with a low-voltage gain (LVG) function:
+\begin{align}
+\dot{I}_p &= \frac{I_{p,\text{cmd}} \cdot \text{LVG}(V) - I_p}{T_g} \\
+\dot{I}_q &= \frac{I_{q,\text{cmd}} - I_q}{T_g} \\
+\dot{V}_{\text{filt}} &= \frac{V_t - V_{\text{filt}}}{T_{\text{fltr}}}
+\end{align}
+
+The LVG function reduces active current during low-voltage conditions:
+\begin{equation}
+\text{LVG}(V) = \begin{cases}
+0 & V < V_{\text{Lvpnt0}} \\
+(V - V_{\text{Lvpnt0}}) / (V_{\text{Lvpnt1}} - V_{\text{Lvpnt0}}) & V_{\text{Lvpnt0}} \leq V < V_{\text{Lvpnt1}} \\
+1 & V \geq V_{\text{Lvpnt1}}
+\end{cases}
+\end{equation}
+
+\subsection{REECA1: Electrical Control}
+\label{sec:reeca1}
+
+The REECA1 model generates current commands ($I_{p,\text{cmd}}$, $I_{q,\text{cmd}}$) based on plant-level power and voltage references. The state vector is
+\begin{equation}
+\vect{x}_{\text{reec}} = \begin{bmatrix} V_f & P_f & x_{piq} & P_{\text{ord}} \end{bmatrix}^\top.
+\end{equation}
+
+Key control modes:
+\begin{itemize}
+    \item \textbf{QFLAG=0}: Constant reactive current mode ($I_{q,\text{cmd}} = I_{q,\text{cmd0}}$)
+    \item \textbf{QFLAG=1}: Voltage regulation mode with PI controller
+\end{itemize}
+
+Active current command is derived from power order divided by terminal voltage:
+\begin{equation}
+I_{p,\text{cmd}} = \text{clip}\left(\frac{P_{\text{ord}}}{V_t}, I_{p,\min}, I_{p,\max}\right)
+\end{equation}
+
+\subsection{REPCA1: Plant Controller}
+\label{sec:repca1}
+
+The REPCA1 model provides plant-level active and reactive power regulation. The state vector is
+\begin{equation}
+\vect{x}_{\text{repc}} = \begin{bmatrix} V_f & Q_f & x_{s2} & P_f & x_{s5} \end{bmatrix}^\top,
+\end{equation}
+comprising voltage and power measurement filters, and two PI controller integrator states for reactive ($x_{s2}$) and active ($x_{s5}$) power regulation.
+
+\subsection{WTDTA1: Drive Train}
+\label{sec:wtdta1}
+
+The two-mass drive train model captures the torsional dynamics between turbine and generator rotors:
+\begin{equation}
+\vect{x}_{\text{dt}} = \begin{bmatrix} \theta_{tw} & p_t & p_g \end{bmatrix}^\top,
+\end{equation}
+where $\theta_{tw}$ is the shaft twist angle, $p_t = J_t \omega_t$ is the turbine momentum, and $p_g = J_g \omega_g$ is the generator momentum.
+
+The dynamics follow from Newton's second law for rotating masses:
+\begin{align}
+\dot{\theta}_{tw} &= \omega_b (\omega_t - \omega_g) \\
+\dot{p}_t &= T_{\text{aero}} - K_{\text{sh}} \theta_{tw} - D_{\text{sh}} (\omega_t - \omega_g) \\
+\dot{p}_g &= K_{\text{sh}} \theta_{tw} + D_{\text{sh}} (\omega_t - \omega_g) - T_e
+\end{align}
+where $\omega_t = p_t/J_t$, $\omega_g = p_g/J_g$, $K_{\text{sh}}$ is the shaft stiffness, $D_{\text{sh}}$ is the shaft damping, $T_{\text{aero}}$ is the aerodynamic torque, and $T_e$ is the electrical torque.
+
+\subsection{WTTQA1, WTPTA1, WTARA1: Torque, Pitch, and Aerodynamics}
+
+\begin{itemize}
+    \item \textbf{WTTQA1} (3 states): Torque controller with power-speed lookup table, PI speed controller, and power reference filtering. Computes the electrical power reference $P_{\text{ref}}$.
+    \item \textbf{WTPTA1} (3 states): Pitch controller with two PI loops (speed-based and power-based) and pitch actuator dynamics. Outputs blade pitch angle $\theta$.
+    \item \textbf{WTARA1} (algebraic): Aerodynamics model computing aerodynamic power $P_{\text{aero}} = f(\omega_t, \theta)$ from lookup tables.
+\end{itemize}
+
+
+% ============================================================
+\section{Network Solution}
+\label{sec:network}
+% ============================================================
+
+\subsection{Admittance Matrix Construction}
+
+The network is represented by the bus admittance matrix $\mat{Y}_{\text{bus}}$, constructed from Line data in the JSON configuration. Transmission lines use the standard $\pi$-model:
+\begin{equation}
+y_s = \frac{1}{r + jx}, \quad y_{\text{sh}} = j\frac{b}{2},
+\end{equation}
+with the Ybus entries:
+\begin{equation}
+Y_{ii} \mathrel{+}= y_s + y_{\text{sh}}, \quad Y_{jj} \mathrel{+}= y_s + y_{\text{sh}}, \quad Y_{ij} \mathrel{-}= y_s.
+\end{equation}
+
+Transformers with off-nominal tap ratio $t$ are modelled as:
+\begin{equation}
+Y_{ii} \mathrel{+}= \frac{y_s}{t^2} + y_{\text{sh}}, \quad Y_{jj} \mathrel{+}= y_s + y_{\text{sh}}, \quad Y_{ij} = Y_{ji} \mathrel{-}= \frac{y_s}{t}.
+\end{equation}
+
+\subsection{Kron Reduction}
+
+For computational efficiency, non-generator (load) buses are eliminated through Kron reduction. Partitioning the Ybus into active ($a$: generator + grid buses) and load ($l$) subsets:
+\begin{equation}
+\begin{bmatrix} \mat{Y}_{aa} & \mat{Y}_{al} \\ \mat{Y}_{la} & \mat{Y}_{ll} \end{bmatrix}
+\begin{bmatrix} \vect{V}_a \\ \vect{V}_l \end{bmatrix}
+=
+\begin{bmatrix} \vect{I}_a \\ \vect{I}_l \end{bmatrix},
+\end{equation}
+the reduced admittance matrix retaining only active buses is:
+\begin{equation}
+\mat{Y}_{\text{red}} = \mat{Y}_{aa} - \mat{Y}_{al} \mat{Y}_{ll}^{-1} \mat{Y}_{la}.
+\end{equation}
+
+Load admittances are incorporated into $\mat{Y}_{ll}$ as constant impedance loads at nominal voltage: $Y_{\text{load}} = (P - jQ)/|V|^2$ with $|V| = 1.0\pu$.
+
+\subsection{Iterative Network Solution}
+
+The network is solved using an iterative current-balance approach that handles constant power loads. The augmented admittance matrix incorporates generator internal admittances:
+\begin{equation}
+\mat{Y}_{\text{aug}} = \mat{Y}_{\text{bus}} + \text{diag}(y_{g,1}, \ldots, y_{g,N})_{\text{gen buses}}
+\end{equation}
+where $y_{g,i} = 1/(jx''_{d,i})$ is the $i$-th generator's subtransient admittance.
+
+At each iteration $k$:
+\begin{enumerate}
+    \item Compute generator current injection: $I_{\text{gen},i} = y_{g,i} \cdot \underline{E}''_{\text{sys},i}$
+    \item Compute constant power load current: $I_{\text{load},j} = (S_j / V_j^{(k)})^*$
+    \item Compute renewable current injection: $I_{\text{ren}} = (I_p + jI_q) \cdot V/|V|$
+    \item Total injection: $\vect{I}_{\text{total}} = \vect{I}_{\text{gen}} + \vect{I}_{\text{ren}} - \vect{I}_{\text{load}}$
+    \item Solve: $\vect{V}^{(k+1)} = \mat{Y}_{\text{aug}}^{-1} \vect{I}_{\text{total}}$
+    \item Check convergence: $\max_i |V_i^{(k+1)} - V_i^{(k)}| < 10^{-6}$
+\end{enumerate}
+
+This process typically converges within 3--5 iterations.
+
+\subsection{Fault Application}
+
+Faults are modelled by adding a shunt admittance at the faulted bus:
+\begin{equation}
+Y_{\text{bus},ii}^{\text{fault}} = Y_{\text{bus},ii} + \frac{1}{Z_f}
+\end{equation}
+where $Z_f$ is the fault impedance. A solid three-phase fault corresponds to $Z_f \to 0$ (practically $Z_f = 0.01j\pu$). The fault is applied by switching the Ybus during the fault period and restoring it upon clearance.
+
+
+% ============================================================
+\section{Power Flow Analysis}
+\label{sec:power_flow}
+% ============================================================
+
+\subsection{Newton-Raphson AC Power Flow}
+
+The framework includes a Newton-Raphson AC power flow solver for computing the steady-state operating point. The power mismatch equations are:
+\begin{align}
+\Delta P_i &= P_{i,\text{spec}} - V_i \sum_{j=1}^{n} V_j \left[ G_{ij} \cos(\theta_i - \theta_j) + B_{ij} \sin(\theta_i - \theta_j) \right] \label{eq:pf_P} \\
+\Delta Q_i &= Q_{i,\text{spec}} - V_i \sum_{j=1}^{n} V_j \left[ G_{ij} \sin(\theta_i - \theta_j) - B_{ij} \cos(\theta_i - \theta_j) \right] \label{eq:pf_Q}
+\end{align}
+
+The Jacobian matrix is structured as:
+\begin{equation}
+\mat{J} = \begin{bmatrix} \mat{J}_1 & \mat{J}_2 \\ \mat{J}_3 & \mat{J}_4 \end{bmatrix}
+= \begin{bmatrix} \pder{\vect{\Delta P}}{\boldsymbol{\theta}} & \pder{\vect{\Delta P}}{\vect{V}} \\ \pder{\vect{\Delta Q}}{\boldsymbol{\theta}} & \pder{\vect{\Delta Q}}{\vect{V}} \end{bmatrix}
+\end{equation}
+
+The Newton update step with adaptive damping factor $\alpha$ is:
+\begin{equation}
+\begin{bmatrix} \Delta\boldsymbol{\theta} \\ \Delta\vect{V}/\vect{V} \end{bmatrix}^{(k+1)}
+= -\alpha \mat{J}^{-1}
+\begin{bmatrix} \vect{\Delta P} \\ \vect{\Delta Q} \end{bmatrix}^{(k)}
+\end{equation}
+
+\subsection{Automatic Slack Bus Selection}
+
+The power flow implements a three-tier automatic slack bus selection:
+\begin{enumerate}
+    \item \textbf{User-specified}: From the \texttt{Slack} section in JSON (highest priority)
+    \item \textbf{Grid/voltage source}: Infinite bus models (for SMIB systems)
+    \item \textbf{Largest generator}: Generator with highest MVA rating (last resort)
+\end{enumerate}
+
+\subsection{Equilibrium Initialization}
+
+After power flow convergence, component equilibrium states are computed in a four-part process:
+
+\paragraph{Part 1: Power Flow.} Newton-Raphson solver provides voltage magnitudes and angles at all buses.
+
+\paragraph{Part 2: Generator Internal States.} For each generator:
+\begin{align}
+\underline{V} &= V_{\text{mag}} e^{j\theta_V}, \quad \underline{I} = \left(\frac{P + jQ}{\underline{V}}\right)^* \\
+\underline{E} &= \underline{V} + (r_a + jx''_d) \underline{I}, \quad \delta_0 = \angle\underline{E} \\
+\psi_{f,0} &= |\underline{E}| / g_{d1}, \quad p_0 = M \cdot 1.0, \quad P_{m,0} = P_e
+\end{align}
+
+\paragraph{Part 3: Exciter and Governor Initialization.} Each component's \texttt{init\_fn} computes equilibrium states by back-calculating through the signal chain. For example, EXDC2: $v_m = V_t$, $v_r = (K_E + S_E(E_{fd})) \cdot E_{fd}$, $e_{fd} = E_{fd}$, then $V_{\text{ref}} = v_m + K_F E_{fd}/T_{F1} + v_r/K_A$.
+
+\paragraph{Part 4: Network Consistency Refinement.} Stator fluxes $\psi_d$, $\psi_q$ are recomputed from the Park transformation, and exciter voltage sensing states are updated with refined terminal voltages.
+
+The result is machine-precision equilibrium with $\max|\dot{\vect{x}}| < 10^{-12}$.
+
+
+% ============================================================
+\section{Time-Domain Simulation}
+\label{sec:simulation}
+% ============================================================
+
+\subsection{ODE Formulation}
+
+The complete system dynamics are assembled into a single ODE right-hand side function $\dot{\vect{x}} = f(t, \vect{x})$. The flat state vector concatenates all component states:
+\begin{equation}
+\vect{x} = \begin{bmatrix} \vect{x}_{g,1}^\top & \vect{x}_{e,1}^\top & \vect{x}_{v,1}^\top & \cdots & \vect{x}_{g,N}^\top & \vect{x}_{e,N}^\top & \vect{x}_{v,N}^\top & \vect{x}_{\text{ren}}^\top \end{bmatrix}^\top
+\end{equation}
+where $\vect{x}_{g,i}$, $\vect{x}_{e,i}$, $\vect{x}_{v,i}$ are the generator, exciter, and governor states for machine $i$, and $\vect{x}_{\text{ren}}$ collects all renewable component states.
+
+The state dimension is:
+\begin{equation}
+n = \sum_{i=1}^{N_{\text{gen}}} (n_{g,i} + n_{e,i} + n_{v,i}) + \sum_{r=1}^{N_{\text{ren}}} n_{\text{ren},r}
+\end{equation}
+
+For a heterogeneous system, $n_{e,i}$ and $n_{v,i}$ vary per machine (e.g., EXDC2 has 4 exciter states while ESST3A has 5).
+
+\subsection{Numerical Integration}
+
+The ODE is integrated using SciPy's \texttt{solve\_ivp} with the explicit Runge-Kutta method (RK45, the default) or implicit methods (Radau, BDF) for stiff systems. Typical solver settings are:
+\begin{itemize}
+    \item Relative tolerance: $10^{-6}$
+    \item Absolute tolerance: $10^{-8}$
+    \item Maximum step size: $0.01$~s (to capture fast dynamics)
+\end{itemize}
+
+Event detection handles fault transitions: the solver is called in three phases (pre-fault, during-fault, post-fault) with the Ybus switched at each transition.
+
+\subsection{Evaluation Loop}
+
+At each evaluation of $f(t, \vect{x})$, the following computational sequence is executed:
+\begin{enumerate}
+    \item \textbf{State extraction}: Unpack flat vector into per-machine component states
+    \item \textbf{Fault determination}: Check if $t_{\text{fault}} \leq t < t_{\text{fault}} + t_{\text{dur}}$
+    \item \textbf{Network solution}: Solve for $I_d, I_q, V_d, V_q$ using the iterative method of \Cref{sec:network}
+    \item \textbf{Exciter output}: Compute $E_{fd,i}$ from exciter states and terminal voltage
+    \item \textbf{Governor output}: Compute $T_{m,i}$ from governor states and rotor speed
+    \item \textbf{Component dynamics}: Evaluate $\dot{\vect{x}}_{g,i}$, $\dot{\vect{x}}_{e,i}$, $\dot{\vect{x}}_{v,i}$ for each machine
+    \item \textbf{Renewable dynamics}: Evaluate all WT3 sub-component derivatives
+    \item \textbf{Assembly}: Concatenate derivatives into flat output vector
+\end{enumerate}
+
+
+% ============================================================
+\section{Performance Optimization}
+\label{sec:performance}
+% ============================================================
+
+Two complementary optimization strategies were implemented to accelerate the simulation, achieving a combined speedup of approximately 6$\times$.
+
+\subsection{Numba JIT Compilation}
+
+All seven component dynamics functions were converted to Numba \texttt{@njit(cache=True)} compiled versions. The key transformation replaces Python dictionary-based function signatures with flat NumPy array interfaces:
+\begin{equation}
+f_{\text{dict}}(\vect{x}, \texttt{ports\_dict}, \texttt{meta\_dict}) \to f_{\text{jit}}(\vect{x}, \vect{p}, \vect{m})
+\end{equation}
+where $\vect{p} \in \mathbb{R}^{n_p}$ is a pre-allocated ports array and $\vect{m} \in \mathbb{R}^{n_m}$ is a packed metadata array.
+
+\begin{table}[H]
+\centering
+\caption{JIT-compiled component functions}
+\label{tab:jit_components}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Component} & \textbf{States} & \textbf{Ports} & \textbf{Meta} & \textbf{Special Handling} \\
+\midrule
+GENROU  & 7 & 6  & 8  & Pre-computed $K_{fd}$ \\
+EXDC2   & 4 & 1  & 13 & Pre-computed saturation $A$, $B$ \\
+EXST1   & 4 & 2  & 13 & Dynamic field current limits \\
+ESST3A  & 5 & 6  & 24 & Explicit real/imag arithmetic \\
+IEEEX1  & 5 & 2  & 15 & Pre-computed saturation $A$, $B$ \\
+TGOV1   & 2 & 1  & 10 & Deadband logic \\
+IEEEG1  & 6 & 2  & 22 & Normalized power fractions \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Implementation Details}
+
+\paragraph{Metadata Packing.} Each component provides a \texttt{pack\_meta()} function that converts the parameter dictionary to a flat \texttt{float64} array with named index constants. For models with saturation (EXDC2, IEEEX1), the coefficients $A$ and $B$ in \eqref{eq:saturation} are pre-computed during packing.
+
+\paragraph{Port Buffer Pre-allocation.} Fixed-size port arrays are allocated once per machine and reused across all ODE evaluations, eliminating per-call allocation overhead.
+
+\paragraph{JIT Infrastructure.} A central registry (\texttt{numba\_kernels.py}) maps model names to their JIT functions:
+\begin{lstlisting}[caption={JIT registry structure}, label=lst:registry]
+JIT_REGISTRY = {
+    'GENROU': {
+        'dynamics_jit': genrou_dynamics_jit,
+        'output_jit': None,
+        'pack_meta': pack_genrou_meta,
+        'ports_size': 6, 'meta_size': 8
+    },
+    ...
+}
+\end{lstlisting}
+
+\paragraph{Warmup.} All JIT functions are triggered once with dummy data before simulation begins, ensuring compilation overhead does not affect timing measurements.
+
+\subsection{LU Factorization Caching}
+
+Profiling revealed that the network solver (\texttt{np.linalg.solve}) consumed 72\% of total simulation time through approximately 125{,}000 calls, while component dynamics accounted for only 3.5\%. Since the augmented admittance matrix $\mat{Y}_{\text{aug}}$ is constant between fault transitions, LU factorization caching was implemented:
+
+\begin{equation}
+\underbrace{\mat{Y}_{\text{aug}} = \mat{L}\mat{U}}_{\text{factored once per fault phase}} \implies \vect{V} = \mat{U}^{-1}\mat{L}^{-1}\vect{I}_{\text{total}}
+\end{equation}
+
+The cache key is the tuple $(\texttt{use\_fault}, \texttt{fault\_bus}, Z_f)$, which changes only at fault application and clearance events. This reduces the per-call cost from $\mathcal{O}(n^3)$ (full factorization) to $\mathcal{O}(n^2)$ (forward/back substitution).
+
+\begin{algorithm}[H]
+\caption{Cached LU Network Solve}
+\label{alg:lu_cache}
+\KwIn{$\mat{Y}_{\text{aug}}$, $\vect{I}_{\text{total}}$, fault state key $k$}
+\If{$k \neq k_{\mathrm{cached}}$}{
+    $(\mat{L}, \mat{U}, \vect{\pi}) \gets \textsc{LU\_Factor}(\mat{Y}_{\text{aug}})$\;
+    $k_{\mathrm{cached}} \gets k$\;
+}
+$\vect{V} \gets \textsc{LU\_Solve}(\mat{L}, \mat{U}, \vect{\pi}, \vect{I}_{\text{total}})$\;
+\end{algorithm}
+
+\subsection{Performance Results}
+
+\Cref{tab:performance} summarizes the speedup achieved on two benchmark systems.
+
+\begin{table}[H]
+\centering
+\caption{Simulation performance comparison ($t_{\text{end}} = 15$~s)}
+\label{tab:performance}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{System} & \textbf{Machines} & \textbf{States} & \textbf{Before} & \textbf{After} & \textbf{Speedup} \\
+\midrule
+Kundur 2-area  & 4  & 52  & 53~s & 9~s  & 5.9$\times$ \\
+IEEE 14-bus    & 5  & 85  & 33~s & 5~s  & 6.6$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% ============================================================
+\section{Test Systems and Validation}
+\label{sec:validation}
+% ============================================================
+
+\subsection{Kundur Two-Area Four-Machine System}
+
+The Kundur two-area system~\cite{kundur1994} is a widely used benchmark for inter-area oscillation studies. It consists of:
+\begin{itemize}
+    \item 11 buses, 4 synchronous generators (GENROU, $S_n = 900$~MVA each)
+    \item 2 areas connected by a weak tie-line
+    \item Excitation: EXDC2 on all machines
+    \item Governor: TGOV1 on all machines
+    \item Total load: $\approx 28\pu$ on 100~MVA base
+    \item State dimension: 52 (7 gen + 4 exc + 2 gov per machine)
+\end{itemize}
+
+\subsection{IEEE 14-Bus System}
+
+The IEEE 14-bus system provides validation for heterogeneous component configurations:
+\begin{itemize}
+    \item 14 buses, 5 generators (GENROU), 20 lines/transformers
+    \item Mixed exciters: ESST3A (3 machines), EXST1 (2 machines)
+    \item Mixed governors: IEEEG1 (3 machines), TGOV1 (2 machines)
+    \item State dimension: 85 (varying per machine)
+\end{itemize}
+
+\subsection{IEEE 39-Bus (New England) System}
+
+The IEEE 39-bus system tests scalability:
+\begin{itemize}
+    \item 39 buses, 10 generators (GENROU)
+    \item All ESST3A exciters, all IEEEG1 governors
+    \item State dimension: 180
+\end{itemize}
+
+\subsection{Validation Criteria}
+
+The implementation is validated against the following criteria:
+
+\paragraph{Equilibrium Accuracy.} After power flow initialization, the maximum derivative norm should satisfy $\max_i |\dot{x}_i(0)| < 10^{-10}$. Achieved values:
+\begin{itemize}
+    \item Kundur system: $\max|\dot{\vect{x}}| = 4.2 \times 10^{-13}$
+    \item IEEE 14-bus: $\max|\dot{\vect{x}}| = 2.9 \times 10^{-13}$
+\end{itemize}
+
+\paragraph{No-Fault Steady State.} With no disturbance, rotor angles should remain constant ($\Delta\delta < 0.01^\circ$ over 15~s) and generator speeds should be $\omega = 1.0 \pm 10^{-6}\pu$.
+
+\paragraph{JIT vs. Non-JIT Consistency.} The maximum absolute difference between JIT and dictionary-based simulation results should be $< 10^{-5}$ over the entire trajectory, confirming numerical equivalence.
+
+\paragraph{Post-Fault Recovery.} Following a three-phase fault (typically $Z_f = 0.01j\pu$ for 150~ms), all generators should recover synchronism with damped oscillations, demonstrating transient stability.
+
+
+% ============================================================
+\section{Summary}
+\label{sec:summary}
+% ============================================================
+
+This paper presented the methodology and implementation of a modular Port-Hamiltonian framework for power system dynamic simulation. The key contributions are:
+
+\begin{enumerate}
+    \item A fully modular, JSON-configured simulation platform supporting arbitrary multi-machine systems with heterogeneous component models (GENROU, EXDC2/EXST1/ESST3A/IEEEX1 exciters, TGOV1/IEEEG1 governors, and Type-3 wind turbines).
+
+    \item Rigorous implementation of IEEE-standard component models with proper initialization procedures achieving machine-precision equilibrium ($\max|\dot{\vect{x}}| < 10^{-12}$).
+
+    \item An iterative current-balance network solver with constant power load modelling, Kron reduction, and Park transformations for the generator--network interface.
+
+    \item Performance optimization through Numba JIT compilation of all component dynamics functions and LU factorization caching in the network solver, achieving approximately 6$\times$ speedup.
+
+    \item A comprehensive Type-3 Wind Turbine model (21 states per unit) with seven interconnected sub-components following the PHS framework.
+
+    \item Validation on standard benchmark systems (Kundur 4-machine, IEEE 14-bus, IEEE 39-bus) demonstrating numerical accuracy, equilibrium quality, and transient stability.
+\end{enumerate}
+
+The Port-Hamiltonian formulation provides energy-based stability certificates through the Hamiltonian as a natural Lyapunov function, enabling passivity analysis and region-of-attraction estimation directly from the system model.
+
+
+% ============================================================
+% References
+% ============================================================
+\begin{thebibliography}{99}
+
+\bibitem{vanderschaft2000}
+A.~J. van der Schaft, \emph{L2-Gain and Passivity Techniques in Nonlinear Control}, 2nd ed. London: Springer, 2000.
+
+\bibitem{kundur1994}
+P.~Kundur, \emph{Power System Stability and Control}. New York: McGraw-Hill, 1994.
+
+\bibitem{ieee421}
+IEEE Std 421.5-2016, \emph{IEEE Recommended Practice for Excitation System Models for Power System Stability Studies}, IEEE, 2016.
+
+\bibitem{ieee1110}
+IEEE Std 1110-2019, \emph{IEEE Guide for Synchronous Generator Modeling Practices and Parameter Verification with Applications in Power System Stability Analyses}, IEEE, 2019.
+
+\bibitem{sauer_pai}
+P.~W. Sauer and M.~A. Pai, \emph{Power System Dynamics and Stability}. Upper Saddle River, NJ: Prentice Hall, 1998.
+
+\bibitem{wecc_wt3}
+WECC Renewable Energy Modeling Task Force, ``WECC Wind Power Plant Dynamic Modeling Guide,'' Western Electricity Coordinating Council, Tech. Rep., Apr.~2014.
+
+\bibitem{numba}
+S.~K. Lam, A.~Pitrou, and S.~Seibert, ``Numba: A LLVM-based Python JIT compiler,'' in \emph{Proc. 2nd Workshop on the LLVM Compiler Infrastructure in HPC}, 2015, pp.~1--6.
+
+\bibitem{scipy}
+P.~Virtanen \emph{et al.}, ``SciPy 1.0: Fundamental algorithms for scientific computing in Python,'' \emph{Nature Methods}, vol.~17, no.~3, pp.~261--272, 2020.
+
+\bibitem{milano}
+F.~Milano, \emph{Power System Modelling and Scripting}. London: Springer, 2010.
+
+\bibitem{machowski}
+J.~Machowski, J.~W. Bialek, and J.~R. Bumby, \emph{Power System Dynamics: Stability and Control}, 2nd ed. Chichester: Wiley, 2008.
+
+\end{thebibliography}
+
+\end{document}
