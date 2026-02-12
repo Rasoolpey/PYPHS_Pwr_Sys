@@ -31,6 +31,17 @@ This framework provides a **fully modular architecture** for Port-Hamiltonian mo
 - Clean separation between physics models, system building, and analysis functions
 - Framework designed for continuous expansion
 
+### ⚡ **Performance Optimization (Numba JIT + LU Caching)**
+- **Numba JIT compilation** for all component dynamics functions (~10-50x faster per call)
+  - Array-based function signatures replace Python dicts (Numba `@njit` compatible)
+  - Pre-allocated port buffers eliminate per-call allocation overhead
+  - Cached compilation (`cache=True`) avoids recompilation across sessions
+- **LU factorization caching** for network solver (~6x overall speedup)
+  - Y_aug matrix factored once per fault transition, `lu_solve` per iteration
+  - Cache key: `(use_fault, fault_bus, fault_impedance)` — only recomputed on topology changes
+- **Combined speedup**: ~6x (Kundur 4-machine: 53s→9s, IEEE 14-bus: 33s→5s)
+- JIT warmup before simulation start eliminates first-call compilation penalty
+
 ### 🚀 **Current Analysis Capabilities**
 - **Fault Simulation**: Configurable fault analysis with dynamic Ybus switching
 - **Lyapunov Stability Analysis**: Energy-based stability assessment
@@ -73,8 +84,10 @@ This framework provides a **fully modular architecture** for Port-Hamiltonian mo
 │   ├── pyphs_core.py            # Standalone Port-Hamiltonian Core (symbolic math)
 │   ├── component_factory.py     # Dynamic component loading and registry
 │   ├── system_builder.py        # JSON parser and system assembler
-│   ├── system_coordinator.py    # Network solver, Ybus management, Park transforms
-│   ├── fault_sim_modular.py     # ⭐ Fault simulation module
+│   ├── system_coordinator.py    # Network solver, Ybus management, LU caching
+│   ├── fault_sim_modular.py     # ⭐ Fault simulation module (JIT-accelerated)
+│   ├── numba_kernels.py         # ⚡ JIT registry, prepare_jit_data, warmup
+│   ├── power_flow.py            # Newton-Raphson AC power flow solver
 │   ├── lyapunov_analyzer.py     # ⭐ Lyapunov stability analysis
 │   ├── impedance_scanner.py     # ⭐ Frequency-domain impedance
 │   ├── imtb_scanner.py          # ⭐ IMTB multisine impedance scanner
@@ -594,6 +607,57 @@ All component models follow a consistent Port-Hamiltonian structure and can be m
 - Natural framework for modular system assembly
 - Facilitates parallel development of components
 
+## Performance Optimization
+
+### Numba JIT Compilation
+
+All 7 component dynamics functions have been converted to Numba `@njit(cache=True)` compiled versions using flat numpy arrays instead of Python dictionaries:
+
+| Component | Dict-based (original) | JIT-compiled (new) | States | Meta Size |
+|-----------|----------------------|---------------------|--------|-----------|
+| GENROU    | `genrou_dynamics(x, ports, meta)` | `genrou_dynamics_jit(x, ports, meta)` | 7 | 8 |
+| EXDC2     | `exdc2_dynamics(x, ports, meta)` | `exdc2_dynamics_jit(x, ports, meta)` | 4 | 13 |
+| EXST1     | `exst1_dynamics(x, ports, meta)` | `exst1_dynamics_jit(x, ports, meta)` | 4 | 13 |
+| ESST3A    | `esst3a_dynamics(x, ports, meta)` | `esst3a_dynamics_jit(x, ports, meta)` | 5 | 24 |
+| IEEEX1    | `ieeex1_dynamics(x, ports, meta)` | `ieeex1_dynamics_jit(x, ports, meta)` | 5 | 15 |
+| TGOV1     | `tgov1_dynamics(x, ports, meta)` | `tgov1_dynamics_jit(x, ports, meta)` | 2 | 10 |
+| IEEEG1    | `ieeeg1_dynamics(x, ports, meta)` | `ieeeg1_dynamics_jit(x, ports, meta)` | 6 | 22 |
+
+**Key design choices:**
+- Each component defines index constants at module level (e.g., `_GM_M=0, _GM_D=1, ...`)
+- `pack_<model>_meta(meta_dict)` functions convert Python dicts to flat `float64` arrays (called once at init)
+- Pre-allocated port buffers eliminate per-call array allocation in the hot loop
+- Original dict-based functions kept as fallback for non-JIT path
+- Saturation coefficients (EXDC2, IEEEX1) pre-computed in `pack_meta()` for JIT efficiency
+- ESST3A complex arithmetic uses explicit `cos/sin` instead of `np.exp(1j*...)` for Numba compatibility
+
+**JIT Infrastructure** (`utils/numba_kernels.py`):
+- `JIT_REGISTRY`: Maps model names to `(dynamics_jit, output_jit, pack_meta, ports_size, meta_size)`
+- `prepare_jit_data(builder)`: Packs all component metadata into arrays, resolves JIT functions per machine
+- `warmup_jit(jit_data, n_gen)`: Triggers compilation with dummy data before simulation starts
+
+### LU Factorization Caching
+
+Profiling revealed the true bottleneck was `np.linalg.solve` in the network solver (72% of runtime, ~125,000 calls), not component dynamics (3.5%). Since the Y_aug admittance matrix is constant between fault transitions:
+
+- **Before**: `np.linalg.solve(Y_aug, I_total)` every iteration (O(n^3) factorization + O(n^2) solve)
+- **After**: `lu_factor(Y_aug)` once per fault transition, `lu_solve(lu, I_total)` per iteration (O(n^2) solve only)
+- Cache key: `(use_fault, fault_bus, fault_impedance)` — invalidated only on topology changes
+- Both `Y_aug` and `Y_uu` (Kron-reduced) matrices are cached
+
+### Performance Results
+
+| System | Before | After | Speedup |
+|--------|--------|-------|---------|
+| Kundur 4-machine (t=15s) | 53s | 9s | **5.9x** |
+| IEEE 14-bus 5-machine (t=15s) | 33s | 5s | **6.6x** |
+
+**Usage**: JIT is enabled by default. Pass `use_jit=False` to `simulate()` to disable:
+```python
+sol = sim.simulate(x0, t_end=15.0)              # JIT enabled (default)
+sol = sim.simulate(x0, t_end=15.0, use_jit=False)  # Fallback to dict-based
+```
+
 ## Technical Details
 
 ### State Vector Organization
@@ -916,10 +980,29 @@ To contribute new models or analysis tools:
 
 ---
 
-**Framework Version**: 1.5
+**Framework Version**: 1.6
 **Last Updated**: February 2026
 
 ### Changelog
+
+**v1.6 (February 2026)**
+- **NEW: Numba JIT Compilation for Component Dynamics (~6x overall speedup)**
+  - All 7 component models (GENROU, EXDC2, EXST1, ESST3A, IEEEX1, TGOV1, IEEEG1) have `@njit(cache=True)` compiled versions
+  - Array-based function signatures replace Python dicts for Numba compatibility
+  - Pre-allocated port buffers eliminate per-call allocation in the ODE hot loop
+  - `utils/numba_kernels.py`: JIT registry, `prepare_jit_data()`, `warmup_jit()` infrastructure
+  - ESST3A complex arithmetic converted to explicit real/imag `cos/sin` operations
+  - EXDC2/IEEEX1 saturation coefficients pre-computed in `pack_meta()` for JIT efficiency
+  - Each component has `pack_<model>_meta()`, `<model>_dynamics_jit()`, `<model>_output_jit()`
+- **NEW: LU Factorization Caching in Network Solver**
+  - `system_coordinator.py`: Y_aug factored once per fault transition using `scipy.linalg.lu_factor`
+  - `lu_solve` per iteration instead of full `np.linalg.solve` (O(n^2) vs O(n^3))
+  - Cache key based on fault state: `(use_fault, fault_bus, fault_impedance)`
+  - Both Y_aug and Y_uu (Kron-reduced) matrices cached
+  - Profiling identified `np.linalg.solve` as 72% of runtime (not component dynamics at 3.5%)
+- **Performance Results**: Kundur 53s→9s (5.9x), IEEE 14-bus 33s→5s (6.6x)
+- **Bug Fix**: `KeyError: 'R'` in power_flow.py for IEEEG1 governor (uses 'K' gain, not 'R' droop)
+  - Added guard: `if 'R' in builder.gov_metadata[i]:` before accessing droop parameter
 
 **v1.5 (February 2026)**
 - **NEW: IEEE 14-Bus and IEEE 39-Bus Test Systems**

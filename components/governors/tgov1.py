@@ -3,6 +3,7 @@ import sys
 sys.path.insert(0, '/home/claude')
 from utils.pyphs_core import DynamicsCore
 import numpy as np
+from numba import njit
 
 
 def tgov1_dynamics(x, ports, meta):
@@ -81,6 +82,68 @@ def tgov1_output(x, ports, meta):
 
     Tm = (T2 / T3) * (x1 - x2) + x2 - Dt * (omega - 1.0)
     return Tm
+
+
+# =============================================================================
+# Numba JIT-compiled dynamics (array-based, no dicts)
+# =============================================================================
+
+# Meta array indices
+_TM_R = 0;  _TM_T1 = 1;  _TM_T2 = 2;  _TM_T3 = 3
+_TM_Pref = 4;  _TM_wref = 5;  _TM_VMAX = 6;  _TM_VMIN = 7
+_TM_deadband = 8;  _TM_Dt = 9
+TGOV1_META_SIZE = 10
+
+# Ports array indices
+_TP_omega = 0
+TGOV1_PORTS_SIZE = 1
+
+
+def pack_tgov1_meta(meta_dict):
+    """Pack metadata dict into flat numpy array for JIT."""
+    arr = np.zeros(TGOV1_META_SIZE)
+    arr[_TM_R] = meta_dict['R']
+    arr[_TM_T1] = meta_dict['T1']
+    arr[_TM_T2] = meta_dict['T2']
+    arr[_TM_T3] = meta_dict['T3']
+    arr[_TM_Pref] = meta_dict['Pref']
+    arr[_TM_wref] = meta_dict['wref']
+    arr[_TM_VMAX] = meta_dict['VMAX']
+    arr[_TM_VMIN] = meta_dict['VMIN']
+    arr[_TM_deadband] = meta_dict.get('deadband', 0.0)
+    arr[_TM_Dt] = meta_dict.get('Dt', 0.0)
+    return arr
+
+
+@njit(cache=True)
+def tgov1_dynamics_jit(x, ports, meta):
+    """JIT-compiled TGOV1 dynamics."""
+    x1 = x[0]; x2 = x[1]
+    omega = ports[0]
+    R = meta[0]; T1 = meta[1]; T3 = meta[3]
+    Pref = meta[4]; wref = meta[5]; VMAX = meta[6]; VMIN = meta[7]
+    deadband = meta[8]
+
+    freq_error = wref - omega
+    if abs(freq_error) < deadband:
+        freq_error = 0.0
+
+    gate_cmd = Pref + freq_error / R
+    gate_limited = min(max(gate_cmd, VMIN), VMAX)
+
+    x_dot = np.zeros(2)
+    x_dot[0] = (gate_limited - x1) / T1
+    x_dot[1] = (x1 - x2) / T3
+    return x_dot
+
+
+@njit(cache=True)
+def tgov1_output_jit(x, ports, meta):
+    """JIT-compiled TGOV1 output (mechanical torque)."""
+    x1 = x[0]; x2 = x[1]
+    omega = ports[0]
+    T2 = meta[2]; T3 = meta[3]; Dt = meta[9]
+    return (T2 / T3) * (x1 - x2) + x2 - Dt * (omega - 1.0)
 
 
 def build_tgov1_core(gov_data, S_machine=900.0, S_system=100.0):

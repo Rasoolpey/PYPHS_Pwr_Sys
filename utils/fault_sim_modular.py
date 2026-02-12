@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from utils.system_builder import PowerSystemBuilder
 from utils.system_coordinator import PowerSystemCoordinator
 from utils.power_flow import run_power_flow
+from utils.numba_kernels import prepare_jit_data, warmup_jit
 
 
 class ModularFaultSimulator:
@@ -464,66 +465,115 @@ class ModularFaultSimulator:
         dxdt_per_machine = []  # List of derivative vectors, one per machine
 
         for i in range(self.n_gen):
-            # Get component cores and metadata
-            gen_core = self.builder.generators[i]
-            exc_core = self.builder.exciters[i]
-            gov_core = self.builder.governors[i]
-            
-            gen_meta = self.builder.gen_metadata[i]
-            exc_meta = self.builder.exc_metadata[i]
-            gov_meta = self.builder.gov_metadata[i]
-
             # Extract states for each component
             gen_x = gen_states[i]
             exc_x = exc_states[i]
             gov_x = gov_states[i]
-            
-            # Calculate auxiliary quantities needed for ports
-            delta, p = gen_x[0], gen_x[1]
-            M = gen_meta['M']
-            omega = p / M
-            Vt = np.sqrt(Vd[i]**2 + Vq[i]**2)
-            
-            # Get Efd from exciter using output function (generic for all exciter types)
-            exc_ports_for_output = {
-                'Vt': Vt, 'Vd': Vd[i], 'Vq': Vq[i],
-                'Id': Id[i], 'Iq': Iq[i],
-                'XadIfd': gen_x[4]  # psi_f
-            }
-            if exc_core.output_fn is not None:
-                Efd = exc_core.output_fn(exc_x, exc_ports_for_output, exc_meta)
+
+            # Use JIT-compiled path if available
+            if hasattr(self, 'use_jit') and self.use_jit and self.jit_data['gen_dyn_jit'][i] is not None:
+                jd = self.jit_data
+                gen_meta_arr = jd['gen_meta_arr'][i]
+                exc_meta_arr = jd['exc_meta_arr'][i]
+                gov_meta_arr = jd['gov_meta_arr'][i]
+
+                # Auxiliary quantities
+                omega = gen_x[1] / gen_meta_arr[0]  # p / M (M is index 0)
+                Vt = np.sqrt(Vd[i]**2 + Vq[i]**2)
+
+                # Exciter output (Efd) via JIT
+                exc_out_fn = jd['exc_out_jit'][i]
+                if exc_out_fn is not None:
+                    ep = jd['exc_ports_buf'][i]
+                    exc_model = self.builder.exciters[i].model_name
+                    if exc_model == 'EXDC2':
+                        ep[0] = Vt
+                    elif exc_model == 'EXST1':
+                        ep[0] = Vt; ep[1] = gen_x[4]
+                    elif exc_model == 'ESST3A':
+                        ep[0] = Vt; ep[1] = Id[i]; ep[2] = Iq[i]
+                        ep[3] = Vd[i]; ep[4] = Vq[i]; ep[5] = gen_x[4]
+                    elif exc_model == 'IEEEX1':
+                        ep[0] = Vt; ep[1] = omega
+                    Efd = exc_out_fn(exc_x, ep, exc_meta_arr)
+                else:
+                    Efd = exc_x[min(1, len(exc_x)-1)] if len(exc_x) > 1 else 1.0
+
+                # Governor output (Tm) via JIT
+                gov_out_fn = jd['gov_out_jit'][i]
+                gp = jd['gov_ports_buf'][i]
+                gov_model = self.builder.governors[i].model_name
+                if gov_out_fn is not None:
+                    if gov_model == 'TGOV1':
+                        gp[0] = omega
+                    elif gov_model == 'IEEEG1':
+                        gp[0] = omega; gp[1] = 0.0
+                    Tm = gov_out_fn(gov_x, gp, gov_meta_arr)
+                else:
+                    Tm = gov_x[-1] if len(gov_x) > 0 else 1.0
+
+                # Governor dynamics via JIT
+                gov_dxdt = jd['gov_dyn_jit'][i](gov_x, gp, gov_meta_arr)
+
+                # Generator dynamics via JIT
+                genbuf = jd['gen_ports_buf'][i]
+                genbuf[0] = Id[i]; genbuf[1] = Iq[i]
+                genbuf[2] = Vd[i]; genbuf[3] = Vq[i]
+                genbuf[4] = Tm; genbuf[5] = Efd
+                gen_dxdt = jd['gen_dyn_jit'][i](gen_x, genbuf, gen_meta_arr)
+
+                # Exciter dynamics via JIT (reuse exc_ports_buf already filled)
+                exc_dyn_fn = jd['exc_dyn_jit'][i]
+                exc_dxdt = exc_dyn_fn(exc_x, ep, exc_meta_arr)
+
             else:
-                # Fallback: assume Efd is the second state (works for most exciters)
-                Efd = exc_x[min(1, len(exc_x)-1)] if len(exc_x) > 1 else 1.0
-            
-            # Governor: Get Tm from output function (generic for all governor types)
-            gov_ports = {'omega': omega}
-            if gov_core.output_fn is not None:
-                Tm = gov_core.output_fn(gov_x, gov_ports, gov_meta)
-            else:
-                # Fallback: assume Tm is the last state (works for most governors)
-                Tm = gov_x[-1] if len(gov_x) > 0 else 1.0
-            
-            # Governor dynamics - use the private _dynamics_fn
-            gov_dxdt = gov_core._dynamics_fn(gov_x, gov_ports, gov_meta)
-            
-            # Generator: call its dynamics function
-            gen_ports = {
-                'Id': Id[i], 'Iq': Iq[i],
-                'Vd': Vd[i], 'Vq': Vq[i],
-                'Tm': Tm, 'Efd': Efd
-            }
-            gen_dxdt = gen_core._dynamics_fn(gen_x, gen_ports, gen_meta)
-            
-            # Exciter: call its dynamics function
-            exc_ports = {
-                'Vt': Vt, 'Vd': Vd[i], 'Vq': Vq[i],
-                'Id': Id[i], 'Iq': Iq[i],
-                'XadIfd': gen_x[4],  # psi_f
-                'Efd_fb': Efd
-            }
-            exc_dxdt = exc_core._dynamics_fn(exc_x, exc_ports, exc_meta)
-            
+                # Original dict-based path (fallback)
+                gen_core = self.builder.generators[i]
+                exc_core = self.builder.exciters[i]
+                gov_core = self.builder.governors[i]
+
+                gen_meta = self.builder.gen_metadata[i]
+                exc_meta = self.builder.exc_metadata[i]
+                gov_meta = self.builder.gov_metadata[i]
+
+                delta, p = gen_x[0], gen_x[1]
+                M = gen_meta['M']
+                omega = p / M
+                Vt = np.sqrt(Vd[i]**2 + Vq[i]**2)
+
+                exc_ports_for_output = {
+                    'Vt': Vt, 'Vd': Vd[i], 'Vq': Vq[i],
+                    'Id': Id[i], 'Iq': Iq[i],
+                    'XadIfd': gen_x[4]
+                }
+                if exc_core.output_fn is not None:
+                    Efd = exc_core.output_fn(exc_x, exc_ports_for_output, exc_meta)
+                else:
+                    Efd = exc_x[min(1, len(exc_x)-1)] if len(exc_x) > 1 else 1.0
+
+                gov_ports = {'omega': omega}
+                if gov_core.output_fn is not None:
+                    Tm = gov_core.output_fn(gov_x, gov_ports, gov_meta)
+                else:
+                    Tm = gov_x[-1] if len(gov_x) > 0 else 1.0
+
+                gov_dxdt = gov_core._dynamics_fn(gov_x, gov_ports, gov_meta)
+
+                gen_ports = {
+                    'Id': Id[i], 'Iq': Iq[i],
+                    'Vd': Vd[i], 'Vq': Vq[i],
+                    'Tm': Tm, 'Efd': Efd
+                }
+                gen_dxdt = gen_core._dynamics_fn(gen_x, gen_ports, gen_meta)
+
+                exc_ports = {
+                    'Vt': Vt, 'Vd': Vd[i], 'Vq': Vq[i],
+                    'Id': Id[i], 'Iq': Iq[i],
+                    'XadIfd': gen_x[4],
+                    'Efd_fb': Efd
+                }
+                exc_dxdt = exc_core._dynamics_fn(exc_x, exc_ports, exc_meta)
+
             # Assemble derivative vector for this machine (generic - handles any state count)
             machine_dxdt = np.concatenate([gen_dxdt, exc_dxdt, gov_dxdt])
             dxdt_per_machine.append(machine_dxdt)
@@ -760,10 +810,23 @@ class ModularFaultSimulator:
         
         return x0
 
-    def simulate(self, x0, t_end=15.0, n_points=1500):
+    def simulate(self, x0, t_end=15.0, n_points=1500, use_jit=True):
         """Run simulation"""
         fault_msg = f"fault @ Bus {self.fault_bus}, t={self.fault_start}-{self.fault_start + self.fault_duration}s" if self.fault_enabled else "no fault"
         print(f"\nSimulating {t_end}s, {fault_msg}")
+
+        # Prepare JIT-compiled dynamics (pack metadata into arrays, warmup)
+        if use_jit and self.n_gen > 0:
+            try:
+                print("  Preparing JIT-compiled dynamics...")
+                self.jit_data = prepare_jit_data(self.builder)
+                self.use_jit = True
+                warmup_jit(self.jit_data, self.n_gen)
+            except Exception as e:
+                print(f"  JIT preparation failed ({e}), falling back to Python")
+                self.use_jit = False
+        else:
+            self.use_jit = False
 
         last_print = [0]
         def monitor(t, x):

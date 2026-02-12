@@ -23,6 +23,7 @@ Signal path:
 """
 
 import numpy as np
+from numba import njit
 from utils.pyphs_core import DynamicsCore
 
 
@@ -178,6 +179,126 @@ def ieeeg1_output(x, ports, meta):
     Pm = Pm_HP + Pm_LP
 
     return Pm
+
+
+# =============================================================================
+# Numba JIT-compiled dynamics (array-based, no dicts)
+# =============================================================================
+
+# Meta array indices
+_G1M_K = 0;  _G1M_T1 = 1;  _G1M_T2 = 2;  _G1M_T3 = 3
+_G1M_UO = 4;  _G1M_UC = 5;  _G1M_PMAX = 6;  _G1M_PMIN = 7
+_G1M_T4 = 8;  _G1M_T5 = 9;  _G1M_T6 = 10;  _G1M_T7 = 11
+_G1M_wref = 12;  _G1M_Pref = 13
+_G1M_K1n = 14;  _G1M_K2n = 15;  _G1M_K3n = 16;  _G1M_K4n = 17
+_G1M_K5n = 18;  _G1M_K6n = 19;  _G1M_K7n = 20;  _G1M_K8n = 21
+IEEEG1_META_SIZE = 22
+
+# Ports array indices: [omega, Pm_aux]
+_G1P_omega = 0;  _G1P_Pm_aux = 1
+IEEEG1_PORTS_SIZE = 2
+
+
+def pack_ieeeg1_meta(meta_dict):
+    """Pack metadata dict into flat numpy array for JIT."""
+    arr = np.zeros(IEEEG1_META_SIZE)
+    arr[_G1M_K] = meta_dict['K']
+    arr[_G1M_T1] = meta_dict['T1']
+    arr[_G1M_T2] = meta_dict['T2']
+    arr[_G1M_T3] = meta_dict['T3']
+    arr[_G1M_UO] = meta_dict['UO']
+    arr[_G1M_UC] = meta_dict['UC']
+    arr[_G1M_PMAX] = meta_dict['PMAX']
+    arr[_G1M_PMIN] = meta_dict['PMIN']
+    arr[_G1M_T4] = meta_dict['T4']
+    arr[_G1M_T5] = meta_dict['T5']
+    arr[_G1M_T6] = meta_dict['T6']
+    arr[_G1M_T7] = meta_dict['T7']
+    arr[_G1M_wref] = meta_dict['wref']
+    arr[_G1M_Pref] = meta_dict.get('Pref', 0.0)
+    arr[_G1M_K1n] = meta_dict['K1n']
+    arr[_G1M_K2n] = meta_dict['K2n']
+    arr[_G1M_K3n] = meta_dict['K3n']
+    arr[_G1M_K4n] = meta_dict['K4n']
+    arr[_G1M_K5n] = meta_dict['K5n']
+    arr[_G1M_K6n] = meta_dict['K6n']
+    arr[_G1M_K7n] = meta_dict['K7n']
+    arr[_G1M_K8n] = meta_dict['K8n']
+    return arr
+
+
+@njit(cache=True)
+def ieeeg1_dynamics_jit(x, ports, meta):
+    """JIT-compiled IEEEG1 dynamics."""
+    xll = x[0]; vpos = x[1]; x4 = x[2]; x5 = x[3]; x6 = x[4]; x7 = x[5]
+    omega = ports[0]; Pm_aux = ports[1]
+    K = meta[0]; T1 = meta[1]; T2 = meta[2]; T3 = meta[3]
+    UO = meta[4]; UC = meta[5]; PMAX = meta[6]; PMIN = meta[7]
+    T4 = meta[8]; T5 = meta[9]; T6 = meta[10]; T7 = meta[11]
+    wref = meta[12]; Pref = meta[13]
+
+    x_dot = np.zeros(6)
+    wd = wref - omega
+
+    # Lead-lag
+    if T1 > 1e-6:
+        x_dot[0] = (wd - xll) / T1
+        LL_y = K * (wd + (T2 - T1) * xll / T1)
+    else:
+        x_dot[0] = 0.0
+        LL_y = K * T2 * wd
+
+    # Valve speed with rate limits
+    vs = (LL_y + Pm_aux + Pref - vpos) / T3
+    if vs > UO:
+        vsl = UO
+    elif vs < UC:
+        vsl = UC
+    else:
+        vsl = vs
+
+    # Valve position with anti-windup
+    if vpos >= PMAX and vsl > 0.0:
+        x_dot[1] = 0.0
+    elif vpos <= PMIN and vsl < 0.0:
+        x_dot[1] = 0.0
+    else:
+        x_dot[1] = vsl
+
+    # Four lag stages
+    if T4 > 1e-6:
+        x_dot[2] = (vpos - x4) / T4
+    else:
+        x_dot[2] = 0.0
+        x4 = vpos
+
+    if T5 > 1e-6:
+        x_dot[3] = (x4 - x5) / T5
+    else:
+        x_dot[3] = 0.0
+        x5 = x4
+
+    if T6 > 1e-6:
+        x_dot[4] = (x5 - x6) / T6
+    else:
+        x_dot[4] = 0.0
+        x6 = x5
+
+    if T7 > 1e-6:
+        x_dot[5] = (x6 - x7) / T7
+    else:
+        x_dot[5] = 0.0
+
+    return x_dot
+
+
+@njit(cache=True)
+def ieeeg1_output_jit(x, ports, meta):
+    """JIT-compiled IEEEG1 output (total mechanical power)."""
+    x4 = x[2]; x5 = x[3]; x6 = x[4]; x7 = x[5]
+    K1n = meta[14]; K2n = meta[15]; K3n = meta[16]; K4n = meta[17]
+    K5n = meta[18]; K6n = meta[19]; K7n = meta[20]; K8n = meta[21]
+    return (K1n + K2n) * x4 + (K3n + K4n) * x5 + (K5n + K6n) * x6 + (K7n + K8n) * x7
 
 
 def build_ieeeg1_core(gov_data, S_machine=900.0, S_system=100.0, initial_conditions=None):

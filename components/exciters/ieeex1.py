@@ -18,6 +18,7 @@ Signal path:
 """
 
 import numpy as np
+from numba import njit
 from utils.pyphs_core import DynamicsCore
 
 
@@ -209,8 +210,141 @@ def ieeex1_output(x, ports, meta):
     # Field voltage with speed compensation
     # Efd = vp * omega
     Efd = vp * omega
-    
+
     return Efd
+
+
+# =============================================================================
+# Numba JIT-compiled dynamics (array-based, no dicts)
+# =============================================================================
+
+# Meta array indices
+_X1M_TR = 0;  _X1M_TC = 1;  _X1M_TB = 2;  _X1M_KA = 3;  _X1M_TA = 4
+_X1M_VRMAX = 5;  _X1M_VRMIN = 6;  _X1M_TE = 7;  _X1M_KE = 8
+_X1M_KF1 = 9;  _X1M_TF1 = 10;  _X1M_Vref = 11
+_X1M_SAT_A = 12;  _X1M_SAT_B = 13;  _X1M_SAT_E1 = 14
+IEEEX1_META_SIZE = 15
+
+# Ports array indices: [Vt, omega]
+_X1P_Vt = 0;  _X1P_omega = 1
+IEEEX1_PORTS_SIZE = 2
+
+
+def _precompute_ieeex1_sat(meta_dict):
+    """Pre-compute saturation A, B from E1/SE1/E2/SE2."""
+    E1 = meta_dict.get('E1', 0.0)
+    SE1 = meta_dict.get('SE1', 0.0)
+    E2 = meta_dict.get('E2', 1.0)
+    SE2 = meta_dict.get('SE2', 1.0)
+    if E1 <= 1e-6 or E2 <= 1e-6 or SE1 <= 1e-6:
+        return 0.0, 0.0, E1
+    ratio = SE1 * E1 / (SE2 * E2) if SE2 * E2 > 1e-9 else 0.0
+    sqrt_ratio = np.sqrt(ratio) if ratio > 0 else 0.0
+    if abs(1 - sqrt_ratio) > 1e-6:
+        A = (E1 - sqrt_ratio * E2) / (1 - sqrt_ratio)
+    else:
+        A = E1 * 0.5
+    if abs(E1 - A) > 1e-6:
+        B = SE1 * E1 / ((E1 - A) ** 2)
+    else:
+        B = 0.0
+    return A, B, E1
+
+
+def pack_ieeex1_meta(meta_dict):
+    """Pack metadata dict into flat numpy array for JIT."""
+    arr = np.zeros(IEEEX1_META_SIZE)
+    arr[_X1M_TR] = meta_dict['TR']
+    arr[_X1M_TC] = meta_dict['TC']
+    arr[_X1M_TB] = meta_dict['TB']
+    arr[_X1M_KA] = meta_dict['KA']
+    arr[_X1M_TA] = meta_dict['TA']
+    arr[_X1M_VRMAX] = meta_dict['VRMAX']
+    arr[_X1M_VRMIN] = meta_dict['VRMIN']
+    arr[_X1M_TE] = meta_dict['TE']
+    arr[_X1M_KE] = meta_dict['KE']
+    arr[_X1M_KF1] = meta_dict['KF1']
+    arr[_X1M_TF1] = meta_dict['TF1']
+    arr[_X1M_Vref] = meta_dict['Vref']
+    A, B, E1 = _precompute_ieeex1_sat(meta_dict)
+    arr[_X1M_SAT_A] = A
+    arr[_X1M_SAT_B] = B
+    arr[_X1M_SAT_E1] = E1
+    return arr
+
+
+@njit(cache=True)
+def _ieeex1_sat_jit(vp_abs, A, B, E1):
+    """JIT-compiled saturation with pre-computed A, B."""
+    if vp_abs <= A or B == 0.0 or E1 <= 1e-6:
+        return 0.0
+    return B * (vp_abs - A) ** 2 / vp_abs
+
+
+@njit(cache=True)
+def ieeex1_dynamics_jit(x, ports, meta):
+    """JIT-compiled IEEEX1 dynamics."""
+    vm = x[0]; vll = x[1]; vr = x[2]; vp = x[3]; vf = x[4]
+    Vt = ports[0]; omega = ports[1]
+    TR = meta[0]; TC = meta[1]; TB = meta[2]; KA = meta[3]; TA = meta[4]
+    VRMAX = meta[5]; VRMIN = meta[6]; TE = meta[7]; KE = meta[8]
+    KF1 = meta[9]; TF1 = meta[10]; Vref = meta[11]
+    SAT_A = meta[12]; SAT_B = meta[13]; SAT_E1 = meta[14]
+
+    x_dot = np.zeros(5)
+
+    # Voltage measurement
+    if TR > 1e-6:
+        x_dot[0] = (Vt - vm) / TR
+    else:
+        x_dot[0] = 0.0
+
+    # Washout feedback
+    if TF1 > 1e-6:
+        x_dot[4] = (vp - vf) / TF1
+        Vf_out = KF1 * (vp - vf) / TF1
+    else:
+        x_dot[4] = 0.0
+        Vf_out = 0.0
+
+    Verr = Vref - vm - Vf_out
+
+    # Lead-lag
+    if TB > 1e-6:
+        x_dot[1] = (Verr - vll) / TB
+        vll_out = vll + TC / TB * (Verr - vll)
+    else:
+        x_dot[1] = 0.0
+        vll_out = Verr if TC > 1e-6 else 0.0
+
+    # Regulator with V-dependent limits
+    vr_max = VRMAX * Vt
+    vr_min = VRMIN * Vt
+    vr_unlimited = KA * vll_out
+    if TA > 1e-6:
+        if vr >= vr_max and vr_unlimited > vr:
+            x_dot[2] = 0.0
+        elif vr <= vr_min and vr_unlimited < vr:
+            x_dot[2] = 0.0
+        else:
+            x_dot[2] = (vr_unlimited - vr) / TA
+    else:
+        x_dot[2] = 0.0
+
+    # Exciter with saturation
+    Se = _ieeex1_sat_jit(abs(vp), SAT_A, SAT_B, SAT_E1)
+    if TE > 1e-6:
+        x_dot[3] = (vr - KE * vp - Se * vp) / TE
+    else:
+        x_dot[3] = 0.0
+
+    return x_dot
+
+
+@njit(cache=True)
+def ieeex1_output_jit(x, ports, meta):
+    """JIT-compiled IEEEX1 output (Efd = vp * omega)."""
+    return x[3] * ports[1]
 
 
 def compute_initial_states(Vt, Efd_desired, omega, params):

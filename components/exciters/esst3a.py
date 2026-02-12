@@ -3,6 +3,7 @@ import sys
 sys.path.insert(0, '/home/claude')
 from utils.pyphs_core import DynamicsCore
 import numpy as np
+from numba import njit
 
 
 def esst3a_dynamics(x, ports, meta):
@@ -201,6 +202,219 @@ def esst3a_output(x, ports, meta):
     Efd_min = meta.get('Efd_min', 0.0)
     Efd = np.clip(Efd_unlimited, Efd_min, Efd_max)
     
+    return Efd
+
+
+# =============================================================================
+# Numba JIT-compiled dynamics (array-based, no dicts)
+# =============================================================================
+
+# Meta array indices
+_S3M_TR = 0;  _S3M_KA = 1;  _S3M_TA = 2;  _S3M_TC = 3;  _S3M_TB = 4
+_S3M_KM = 5;  _S3M_TM = 6;  _S3M_VRMAX = 7;  _S3M_VRMIN = 8
+_S3M_VMMAX = 9;  _S3M_VMMIN = 10;  _S3M_VIMAX = 11;  _S3M_VIMIN = 12
+_S3M_VBMAX = 13;  _S3M_KC = 14;  _S3M_KP = 15;  _S3M_KI = 16
+_S3M_XL = 17;  _S3M_KG = 18;  _S3M_VGMAX = 19;  _S3M_THETAP = 20
+_S3M_vref = 21;  _S3M_Efd_max = 22;  _S3M_Efd_min = 23
+ESST3A_META_SIZE = 24
+
+# Ports array indices: [Vt, Id, Iq, Vd, Vq, XadIfd]
+_S3P_Vt = 0;  _S3P_Id = 1;  _S3P_Iq = 2;  _S3P_Vd = 3;  _S3P_Vq = 4;  _S3P_XadIfd = 5
+ESST3A_PORTS_SIZE = 6
+
+
+def pack_esst3a_meta(meta_dict):
+    """Pack metadata dict into flat numpy array for JIT."""
+    arr = np.zeros(ESST3A_META_SIZE)
+    arr[_S3M_TR] = meta_dict['TR']
+    arr[_S3M_KA] = meta_dict['KA']
+    arr[_S3M_TA] = meta_dict['TA']
+    arr[_S3M_TC] = meta_dict['TC']
+    arr[_S3M_TB] = meta_dict['TB']
+    arr[_S3M_KM] = meta_dict['KM']
+    arr[_S3M_TM] = meta_dict['TM']
+    arr[_S3M_VRMAX] = meta_dict['VRMAX']
+    arr[_S3M_VRMIN] = meta_dict['VRMIN']
+    arr[_S3M_VMMAX] = meta_dict['VMMAX']
+    arr[_S3M_VMMIN] = meta_dict['VMMIN']
+    arr[_S3M_VIMAX] = meta_dict['VIMAX']
+    arr[_S3M_VIMIN] = meta_dict['VIMIN']
+    arr[_S3M_VBMAX] = meta_dict['VBMAX']
+    arr[_S3M_KC] = meta_dict['KC']
+    arr[_S3M_KP] = meta_dict['KP']
+    arr[_S3M_KI] = meta_dict['KI']
+    arr[_S3M_XL] = meta_dict['XL']
+    arr[_S3M_KG] = meta_dict['KG']
+    arr[_S3M_VGMAX] = meta_dict['VGMAX']
+    arr[_S3M_THETAP] = meta_dict['THETAP']
+    arr[_S3M_vref] = meta_dict.get('vref', 1.0)
+    arr[_S3M_Efd_max] = meta_dict.get('Efd_max', 5.0)
+    arr[_S3M_Efd_min] = meta_dict.get('Efd_min', 0.0)
+    return arr
+
+
+@njit(cache=True)
+def esst3a_dynamics_jit(x, ports, meta):
+    """JIT-compiled ESST3A dynamics. Uses cos/sin instead of np.exp(1j*...)."""
+    LG_y = x[0]; LL_exc_x = x[1]; VR = x[2]; VM = x[3]; VB_state = x[4]
+    Vt = ports[0]; Id = ports[1]; Iq = ports[2]; Vd = ports[3]; Vq = ports[4]
+    XadIfd = ports[5]
+
+    TR = meta[0]; KA = meta[1]; TA = meta[2]; TC = meta[3]; TB = meta[4]
+    KM = meta[5]; TM = meta[6]; VRMAX = meta[7]; VRMIN = meta[8]
+    VMMAX = meta[9]; VMMIN = meta[10]; VIMAX = meta[11]; VIMIN = meta[12]
+    VBMAX = meta[13]; KC = meta[14]; KP = meta[15]; KI = meta[16]
+    XL = meta[17]; KG = meta[18]; VGMAX = meta[19]; THETAP = meta[20]
+    vref = meta[21]
+
+    x_dot = np.zeros(5)
+
+    # 1. Voltage transducer
+    if TR > 1e-6:
+        x_dot[0] = (Vt - LG_y) / TR
+    else:
+        x_dot[0] = 0.0
+
+    # 2. Voltage error + input limiter
+    vi = vref - LG_y
+    if vi > VIMAX:
+        vil = VIMAX
+    elif vi < VIMIN:
+        vil = VIMIN
+    else:
+        vil = vi
+
+    # 3. Lead-lag
+    if TC > 1e-6:
+        LL_exc_y = (TB / TC) * (vil - LL_exc_x) + LL_exc_x
+        x_dot[1] = (vil - LL_exc_x) / TC
+    else:
+        LL_exc_y = vil
+        x_dot[1] = 0.0
+
+    # 4. Voltage regulator with anti-windup
+    VR_unlimited = KA * LL_exc_y
+    if TA > 1e-6:
+        if VR_unlimited > VRMAX:
+            VR_limited = VRMAX
+        elif VR_unlimited < VRMIN:
+            VR_limited = VRMIN
+        else:
+            VR_limited = VR_unlimited
+        VR_derivative = (VR_limited - VR) / TA
+        if VR >= VRMAX and VR_derivative > 0.0:
+            x_dot[2] = 0.0
+        elif VR <= VRMIN and VR_derivative < 0.0:
+            x_dot[2] = 0.0
+        else:
+            x_dot[2] = VR_derivative
+    else:
+        x_dot[2] = 0.0
+
+    # 5. VE computation (complex math via cos/sin)
+    theta_rad = THETAP * 0.017453292519943295  # pi/180
+    KPC_r = KP * np.cos(theta_rad)
+    KPC_i = KP * np.sin(theta_rad)
+    # z1 = KPC * (Vd + j*Vq)
+    z1_r = KPC_r * Vd - KPC_i * Vq
+    z1_i = KPC_r * Vq + KPC_i * Vd
+    # z2 = j*(KI + KPC*XL) * (Id + j*Iq)
+    # KPC*XL: scalar*(complex) = (KPC_r*XL, KPC_i*XL)
+    coeff_r = -(KI + KPC_i * XL)  # real part of j*(KI + KPC*XL) -> -(KPC_i*XL + KI) from imaginary
+    coeff_i = KPC_r * XL           # imag part of j*(KI + KPC*XL) -> KPC_r*XL from real
+    # Wait, let me redo: j*(KI + KPC*XL)
+    # KPC*XL = (KPC_r*XL) + j*(KPC_i*XL)
+    # KI + KPC*XL = (KI + KPC_r*XL) + j*(KPC_i*XL)
+    # j * above = -(KPC_i*XL) + j*(KI + KPC_r*XL)
+    jcoeff_r = -(KPC_i * XL)
+    jcoeff_i = KI + KPC_r * XL
+    # z2 = jcoeff * (Id + j*Iq)
+    z2_r = jcoeff_r * Id - jcoeff_i * Iq
+    z2_i = jcoeff_r * Iq + jcoeff_i * Id
+    VE = np.sqrt((z1_r + z2_r)**2 + (z1_i + z2_i)**2)
+
+    # 6. Rectifier regulation
+    if VE > 1e-6:
+        IN = KC * XadIfd / VE
+    else:
+        IN = 0.0
+
+    # 7. FEX piecewise
+    if IN <= 0.0:
+        FEX = 1.0
+    elif IN <= 0.433:
+        FEX = 1.0 - 0.577 * IN
+    elif IN <= 0.75:
+        FEX = np.sqrt(0.75 - IN * IN)
+    elif IN <= 1.0:
+        FEX = 1.732 * (1.0 - IN)
+    else:
+        FEX = 0.0
+
+    # 8. VB with limiter
+    VB = VE * FEX
+    if VB > VBMAX:
+        VB = VBMAX
+    elif VB < 0.0:
+        VB = 0.0
+
+    VB_state_max = min(VBMAX, 5.0)
+    VB_derivative = (VB - VB_state) / 0.01
+    if VB_state >= VB_state_max and VB_derivative > 0.0:
+        x_dot[4] = 0.0
+    elif VB_state <= 0.0 and VB_derivative < 0.0:
+        x_dot[4] = 0.0
+    else:
+        x_dot[4] = VB_derivative
+
+    # 9. Feedback and inner regulator
+    VB_state_limited = max(min(VB_state, VB_state_max), 0.0)
+    VM_limited_internal = max(min(VM, 10.0), 0.1)
+    Efd = VB_state_limited * VM_limited_internal
+    if Efd > 5.0:
+        Efd = 5.0
+    elif Efd < 0.0:
+        Efd = 0.0
+    VG = KG * Efd
+    if VG > VGMAX:
+        VG = VGMAX
+    elif VG < 0.0:
+        VG = 0.0
+
+    vrs = VR - VG
+    VM_unlimited = KM * vrs
+    VMMAX_realistic = min(VMMAX, 10.0) if VMMAX < 90.0 else 10.0
+
+    if TM > 1e-6:
+        if VM_unlimited > VMMAX_realistic:
+            VM_limited = VMMAX_realistic
+        elif VM_unlimited < VMMIN:
+            VM_limited = VMMIN
+        else:
+            VM_limited = VM_unlimited
+        VM_derivative = (VM_limited - VM) / TM
+        if VM >= VMMAX_realistic and VM_derivative > 0.0:
+            x_dot[3] = 0.0
+        elif VM <= VMMIN and VM_derivative < 0.0:
+            x_dot[3] = 0.0
+        else:
+            x_dot[3] = VM_derivative
+    else:
+        x_dot[3] = 0.0
+
+    return x_dot
+
+
+@njit(cache=True)
+def esst3a_output_jit(x, ports, meta):
+    """JIT-compiled ESST3A output (Efd = VB_state * VM, limited)."""
+    VM = x[3]; VB_state = x[4]
+    Efd_max = meta[22]; Efd_min = meta[23]
+    Efd = VB_state * VM
+    if Efd > Efd_max:
+        return Efd_max
+    elif Efd < Efd_min:
+        return Efd_min
     return Efd
 
 

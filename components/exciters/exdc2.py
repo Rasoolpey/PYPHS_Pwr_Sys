@@ -3,6 +3,7 @@ import sys
 sys.path.insert(0, '/home/claude')
 from utils.pyphs_core import DynamicsCore
 import numpy as np
+from numba import njit
 
 
 def _compute_saturation(Efd, meta):
@@ -145,6 +146,101 @@ def exdc2_output(x, ports, meta):
     """
     vm, vr, efd, xf = x
     return efd
+
+
+# =============================================================================
+# Numba JIT-compiled dynamics (array-based, no dicts)
+# =============================================================================
+
+# Meta array indices
+_EM_TR = 0;  _EM_TA = 1;  _EM_KA = 2;  _EM_KE = 3;  _EM_TE = 4
+_EM_KF = 5;  _EM_TF1 = 6;  _EM_Vref = 7;  _EM_VRMAX = 8;  _EM_VRMIN = 9
+_EM_SAT_A = 10;  _EM_SAT_B = 11;  _EM_SAT_E1 = 12
+EXDC2_META_SIZE = 13
+
+# Ports array indices
+_EP_Vt = 0
+EXDC2_PORTS_SIZE = 1
+
+
+def _precompute_saturation_coeffs(meta_dict):
+    """Pre-compute saturation A, B coefficients from E1/SE1/E2/SE2."""
+    E1 = meta_dict.get('E1', 0.0)
+    SE1 = meta_dict.get('SE1', 0.0)
+    E2 = meta_dict.get('E2', 1.0)
+    SE2 = meta_dict.get('SE2', 1.0)
+    if E1 == 0 or E2 == 0 or abs(E2 - E1) < 1e-10:
+        return 0.0, 0.0, E1
+    sqrt_SE1E1 = np.sqrt(SE1 * E1) if SE1 * E1 > 0 else 0.0
+    sqrt_SE2E2 = np.sqrt(SE2 * E2) if SE2 * E2 > 0 else 0.0
+    if abs(sqrt_SE2E2 - sqrt_SE1E1) < 1e-10:
+        return 0.0, 0.0, E1
+    A = (E1 * sqrt_SE2E2 - E2 * sqrt_SE1E1) / (sqrt_SE2E2 - sqrt_SE1E1)
+    B_denom = E1 - A
+    if abs(B_denom) < 1e-10:
+        return 0.0, 0.0, E1
+    B = (sqrt_SE1E1 / B_denom) ** 2
+    return A, B, E1
+
+
+def pack_exdc2_meta(meta_dict):
+    """Pack metadata dict into flat numpy array for JIT."""
+    arr = np.zeros(EXDC2_META_SIZE)
+    arr[_EM_TR] = meta_dict['TR']
+    arr[_EM_TA] = meta_dict['TA']
+    arr[_EM_KA] = meta_dict['KA']
+    arr[_EM_KE] = meta_dict['KE']
+    arr[_EM_TE] = meta_dict['TE']
+    arr[_EM_KF] = meta_dict['KF']
+    arr[_EM_TF1] = meta_dict['TF1']
+    arr[_EM_Vref] = meta_dict['Vref']
+    arr[_EM_VRMAX] = meta_dict['VRMAX']
+    arr[_EM_VRMIN] = meta_dict['VRMIN']
+    A, B, E1 = _precompute_saturation_coeffs(meta_dict)
+    arr[_EM_SAT_A] = A
+    arr[_EM_SAT_B] = B
+    arr[_EM_SAT_E1] = E1
+    return arr
+
+
+@njit(cache=True)
+def _sat_jit(Efd_abs, A, B, E1):
+    """JIT-compiled saturation with pre-computed A, B."""
+    if Efd_abs < 0.75 * E1 or Efd_abs <= A or B == 0.0:
+        return 0.0
+    return B * (Efd_abs - A) ** 2 / Efd_abs
+
+
+@njit(cache=True)
+def exdc2_dynamics_jit(x, ports, meta):
+    """JIT-compiled EXDC2 dynamics."""
+    vm = x[0]; vr = x[1]; efd = x[2]; xf = x[3]
+    Vt = ports[0]
+    TR = meta[0]; TA = meta[1]; KA = meta[2]; KE = meta[3]; TE = meta[4]
+    KF = meta[5]; TF1 = meta[6]; Vref = meta[7]; VRMAX = meta[8]; VRMIN = meta[9]
+    SAT_A = meta[10]; SAT_B = meta[11]; SAT_E1 = meta[12]
+
+    x_dot = np.zeros(4)
+    x_dot[0] = (Vt - vm) / TR
+    Vf = KF * (efd - xf) / TF1
+    Verr = Vref - vm - Vf
+    vr_unlimited = (KA * Verr - vr) / TA
+    if vr >= VRMAX and vr_unlimited > 0.0:
+        x_dot[1] = 0.0
+    elif vr <= VRMIN and vr_unlimited < 0.0:
+        x_dot[1] = 0.0
+    else:
+        x_dot[1] = vr_unlimited
+    SE_efd = _sat_jit(abs(efd), SAT_A, SAT_B, SAT_E1)
+    x_dot[2] = (vr - (KE + SE_efd) * efd) / TE
+    x_dot[3] = (efd - xf) / TF1
+    return x_dot
+
+
+@njit(cache=True)
+def exdc2_output_jit(x, ports, meta):
+    """JIT-compiled EXDC2 output (Efd = state[2])."""
+    return x[2]
 
 
 def build_exdc2_core(exc_data):

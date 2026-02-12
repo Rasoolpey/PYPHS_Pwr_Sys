@@ -3,6 +3,7 @@ import sys
 sys.path.insert(0, '/home/claude')
 from utils.pyphs_core import DynamicsCore
 import numpy as np
+from numba import njit
 
 
 def genrou_dynamics(x, ports, meta):
@@ -81,6 +82,67 @@ def genrou_dynamics(x, ports, meta):
     x_dot[5] = -psi_kd / Td20  # d(psi_kd)/dt - d-axis damper
     x_dot[6] = -psi_kq / Tq20  # d(psi_kq)/dt - q-axis damper
 
+    return x_dot
+
+
+# =============================================================================
+# Numba JIT-compiled dynamics (array-based, no dicts)
+# =============================================================================
+
+# Meta array indices
+_GM_M = 0;  _GM_D = 1;  _GM_ra = 2;  _GM_omega_b = 3
+_GM_Td10 = 4;  _GM_Td20 = 5;  _GM_Tq20 = 6;  _GM_Kfd_scale = 7
+GENROU_META_SIZE = 8
+
+# Ports array indices
+_GP_Id = 0;  _GP_Iq = 1;  _GP_Vd = 2;  _GP_Vq = 3;  _GP_Tm = 4;  _GP_Efd = 5
+GENROU_PORTS_SIZE = 6
+
+
+def pack_genrou_meta(meta_dict):
+    """Pack metadata dict into flat numpy array for JIT. Called once at init."""
+    arr = np.zeros(GENROU_META_SIZE)
+    arr[_GM_M] = meta_dict['M']
+    arr[_GM_D] = meta_dict['D']
+    arr[_GM_ra] = meta_dict['ra']
+    arr[_GM_omega_b] = meta_dict['omega_b']
+    arr[_GM_Td10] = meta_dict['Td10']
+    arr[_GM_Td20] = meta_dict['Td20']
+    arr[_GM_Tq20] = meta_dict['Tq20']
+    # Pre-compute Kfd_scale = Lf / Xad
+    xd = meta_dict.get('xd', 1.8)
+    xl = meta_dict.get('xl', 0.15)
+    xd1 = meta_dict.get('xd1', 0.6)
+    Xad = xd - xl
+    Xfl = (Xad * (xd1 - xl)) / (Xad - (xd1 - xl))
+    Lf = Xad + Xfl
+    arr[_GM_Kfd_scale] = Lf / Xad
+    return arr
+
+
+@njit(cache=True)
+def genrou_dynamics_jit(x, ports, meta):
+    """JIT-compiled GENROU dynamics. Same math as genrou_dynamics()."""
+    delta = x[0]; p = x[1]; psi_d = x[2]; psi_q = x[3]
+    psi_f = x[4]; psi_kd = x[5]; psi_kq = x[6]
+
+    Id = ports[0]; Iq = ports[1]; Vd = ports[2]; Vq = ports[3]
+    Tm = ports[4]; Efd = ports[5]
+
+    M = meta[0]; D = meta[1]; ra = meta[2]; omega_b = meta[3]
+    Td10 = meta[4]; Td20 = meta[5]; Tq20 = meta[6]; Kfd_scale = meta[7]
+
+    omega = p / M
+    Te = Vd * Id + Vq * Iq
+
+    x_dot = np.zeros(7)
+    x_dot[0] = omega_b * (omega - 1.0)
+    x_dot[1] = Tm - Te - D * (omega - 1.0)
+    x_dot[2] = Vd + ra * Id + omega_b * omega * psi_q
+    x_dot[3] = Vq + ra * Iq - omega_b * omega * psi_d
+    x_dot[4] = (Efd * Kfd_scale - psi_f) / Td10
+    x_dot[5] = -psi_kd / Td20
+    x_dot[6] = -psi_kq / Tq20
     return x_dot
 
 

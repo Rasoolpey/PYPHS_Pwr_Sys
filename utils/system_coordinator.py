@@ -4,6 +4,7 @@ Dynamically builds network from JSON data without hardcoded connections
 Uses proper Kron reduction for network solution
 """
 import numpy as np
+from scipy.linalg import lu_factor, lu_solve
 
 
 class PowerSystemCoordinator:
@@ -31,6 +32,11 @@ class PowerSystemCoordinator:
 
         # Build reduced network for generator buses (considering grid as boundary)
         self._build_reduced_network()
+
+        # LU factorization cache for network solve acceleration
+        self._lu_cache_key = None  # (use_fault, fault_bus, fault_impedance) tuple
+        self._lu_cache = None      # (lu, piv) from scipy.linalg.lu_factor
+        self._lu_cache_uu = None   # For grid-bus case: LU of Y_uu submatrix
 
     def _build_bus_mapping(self):
         """Build bus index mappings from Bus data"""
@@ -428,6 +434,13 @@ class PowerSystemCoordinator:
             gen_bus = self.gen_bus_internal[i]
             Y_aug[gen_bus, gen_bus] += y_gen_internal[i]
 
+        # Cache LU factorization of Y_aug (only changes on fault transitions)
+        cache_key = (use_fault, fault_bus, fault_impedance)
+        if cache_key != self._lu_cache_key:
+            self._lu_cache_key = cache_key
+            self._lu_cache = lu_factor(Y_aug)
+            self._lu_cache_uu = None  # Reset grid sub-matrix cache
+
         # Current injection from generators: I_inj = Y_gen * E
         I_inj = np.zeros(self.n_bus, dtype=complex)
         for i in range(self.n_gen):
@@ -488,25 +501,27 @@ class PowerSystemCoordinator:
                 # Y * V = I becomes:
                 # Y_uu * V_u + Y_ug * V_g = I_u  (solve for V_u)
                 # where u = unknown (non-grid), g = grid (known)
-                
-                Y_uu = Y_aug[np.ix_(solve_buses, solve_buses)]
+
                 Y_ug = Y_aug[np.ix_(solve_buses, grid_bus_indices)]
                 I_u = I_total[solve_buses]
                 V_g = V_bus[grid_bus_indices]
-                
-                # Solve: Y_uu * V_u = I_u - Y_ug * V_g
+
+                # Cache LU of Y_uu sub-matrix
+                if self._lu_cache_uu is None:
+                    Y_uu = Y_aug[np.ix_(solve_buses, solve_buses)]
+                    self._lu_cache_uu = lu_factor(Y_uu)
+
                 try:
-                    V_u_new = np.linalg.solve(Y_uu, I_u - Y_ug @ V_g)
+                    V_u_new = lu_solve(self._lu_cache_uu, I_u - Y_ug @ V_g)
                     V_bus_new = V_bus.copy()
                     V_bus_new[solve_buses] = V_u_new
-                    # Grid voltages remain fixed
-                except np.linalg.LinAlgError:
+                except Exception:
                     break
             else:
-                # No grid buses, solve for all
+                # No grid buses, solve for all using cached LU
                 try:
-                    V_bus_new = np.linalg.solve(Y_aug, I_total)
-                except np.linalg.LinAlgError:
+                    V_bus_new = lu_solve(self._lu_cache, I_total)
+                except Exception:
                     break
 
             # Check convergence (only for non-grid buses)

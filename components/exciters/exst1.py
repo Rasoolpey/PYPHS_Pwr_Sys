@@ -14,6 +14,7 @@ Signal path:
 """
 
 import numpy as np
+from numba import njit
 from utils.pyphs_core import DynamicsCore
 
 
@@ -157,6 +158,100 @@ def exst1_output(x, ports, meta):
         Efd = vr
 
     return Efd
+
+
+# =============================================================================
+# Numba JIT-compiled dynamics (array-based, no dicts)
+# =============================================================================
+
+# Meta array indices
+_S1M_TR = 0;  _S1M_VIMAX = 1;  _S1M_VIMIN = 2;  _S1M_TC = 3;  _S1M_TB = 4
+_S1M_KA = 5;  _S1M_TA = 6;  _S1M_VRMAX = 7;  _S1M_VRMIN = 8
+_S1M_KC = 9;  _S1M_KF = 10;  _S1M_TF = 11;  _S1M_Vref = 12
+EXST1_META_SIZE = 13
+
+# Ports array indices: [Vt, XadIfd]
+_S1P_Vt = 0;  _S1P_XadIfd = 1
+EXST1_PORTS_SIZE = 2
+
+
+def pack_exst1_meta(meta_dict):
+    """Pack metadata dict into flat numpy array for JIT."""
+    arr = np.zeros(EXST1_META_SIZE)
+    arr[_S1M_TR] = meta_dict['TR']
+    arr[_S1M_VIMAX] = meta_dict['VIMAX']
+    arr[_S1M_VIMIN] = meta_dict['VIMIN']
+    arr[_S1M_TC] = meta_dict['TC']
+    arr[_S1M_TB] = meta_dict['TB']
+    arr[_S1M_KA] = meta_dict['KA']
+    arr[_S1M_TA] = meta_dict['TA']
+    arr[_S1M_VRMAX] = meta_dict['VRMAX']
+    arr[_S1M_VRMIN] = meta_dict['VRMIN']
+    arr[_S1M_KC] = meta_dict['KC']
+    arr[_S1M_KF] = meta_dict['KF']
+    arr[_S1M_TF] = meta_dict['TF']
+    arr[_S1M_Vref] = meta_dict['Vref']
+    return arr
+
+
+@njit(cache=True)
+def exst1_dynamics_jit(x, ports, meta):
+    """JIT-compiled EXST1 dynamics."""
+    vm = x[0]; vll = x[1]; vr = x[2]; vf = x[3]
+    Vt = ports[0]; XadIfd = ports[1]
+    TR = meta[0]; VIMAX = meta[1]; VIMIN = meta[2]; TC = meta[3]; TB = meta[4]
+    KA = meta[5]; TA = meta[6]; VRMAX = meta[7]; VRMIN = meta[8]
+    KC = meta[9]; KF = meta[10]; TF = meta[11]; Vref = meta[12]
+
+    x_dot = np.zeros(4)
+    x_dot[0] = (Vt - vm) / TR
+    Vf_out = KF * (vr - vf) / TF
+    Verr = Vref - vm - Vf_out
+
+    # Input limiter
+    if Verr > VIMAX:
+        vi = VIMAX
+    elif Verr < VIMIN:
+        vi = VIMIN
+    else:
+        vi = Verr
+
+    # Lead-lag
+    if TB > 1e-6:
+        x_dot[1] = (vi - vll) / TB
+        vll_out = vll + TC / TB * (vi - vll)
+    else:
+        x_dot[1] = 0.0
+        vll_out = vi if TC > 1e-6 else 0.0
+
+    # Regulator with dynamic limits and anti-windup
+    vr_max_dyn = VRMAX - KC * XadIfd
+    vr_min_dyn = VRMIN - KC * XadIfd
+    vr_unlimited = (KA * vll_out - vr) / TA
+    if vr >= vr_max_dyn and vr_unlimited > 0.0:
+        x_dot[2] = 0.0
+    elif vr <= vr_min_dyn and vr_unlimited < 0.0:
+        x_dot[2] = 0.0
+    else:
+        x_dot[2] = vr_unlimited
+
+    x_dot[3] = (vr - vf) / TF
+    return x_dot
+
+
+@njit(cache=True)
+def exst1_output_jit(x, ports, meta):
+    """JIT-compiled EXST1 output (Efd with dynamic limits)."""
+    vr = x[2]
+    XadIfd = ports[1]
+    VRMAX = meta[7]; VRMIN = meta[8]; KC = meta[9]
+    vr_max = VRMAX - KC * XadIfd
+    vr_min = VRMIN - KC * XadIfd
+    if vr > vr_max:
+        return vr_max
+    elif vr < vr_min:
+        return vr_min
+    return vr
 
 
 def build_exst1_core(exc_data, initial_conditions=None):
