@@ -1,0 +1,19 @@
+{
+  "simulation": {
+    "t_end": 15.0,
+    "num_points": 3000,
+    "solver": "Radau",
+    "rtol": 1e-6,
+    "atol": 1e-8
+  },
+  "fault": {
+    "enabled": true,
+    "bus": 9,
+    "t_start": 1.0,
+    "t_end": 1.1,
+    "impedance": [0.0, 0.0001]
+  },
+  "power_flow": {
+    "enabled": true
+  }
+}

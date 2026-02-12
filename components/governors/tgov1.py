@@ -34,13 +34,19 @@ def tgov1_dynamics(x, ports, meta):
     wref = meta['wref']
     VMAX = meta['VMAX']
     VMIN = meta['VMIN']
+    deadband = meta.get('deadband', 0.0)  # Frequency deadband (for equilibrium tests)
 
     # Use Pm_ref from port if provided, otherwise use Pref from metadata
     if Pm_ref is None:
         Pm_ref = Pref
 
+    # Frequency error with deadband
+    freq_error = wref - omega
+    if abs(freq_error) < deadband:
+        freq_error = 0.0  # No response within deadband
+
     # Gate command with droop
-    gate_cmd = Pm_ref + (wref - omega) / R
+    gate_cmd = Pm_ref + freq_error / R
 
     # Apply limits
     gate_limited = np.clip(gate_cmd, VMIN, VMAX)
@@ -99,6 +105,7 @@ def build_tgov1_core(gov_data, S_machine=900.0, S_system=100.0):
     T2 = max(gov_data['T2'], 0.001)
     T3 = max(gov_data['T3'], 0.001)
     Dt = gov_data.get('Dt', 0.0)
+    deadband = gov_data.get('deadband', 0.0)  # Frequency deadband (pu)
 
     # Governor limits are provided on machine base; scale to system base so they
     # do not clip realistic mechanical power on heavily loaded machines.
@@ -158,6 +165,7 @@ def build_tgov1_core(gov_data, S_machine=900.0, S_system=100.0):
         'VMAX': VMAX_sys,
         'VMIN': VMIN_sys,
         'Dt': Dt,
+        'deadband': deadband,
         'wref': wref,
         'Pref': Pref
     }
@@ -171,5 +179,8 @@ def build_tgov1_core(gov_data, S_machine=900.0, S_system=100.0):
     core.init_fn = lambda Pm_eq, **kwargs: np.array([Pm_eq, Pm_eq])
     core.component_type = "governor"
     core.model_name = "TGOV1"
+    
+    # Override symbolic dynamics with numerical implementation (includes deadband)
+    core._dynamics_fn = tgov1_dynamics
 
     return core, metadata

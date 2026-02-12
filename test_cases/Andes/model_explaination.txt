@@ -1,0 +1,15 @@
+### Renewable energy models
+
+- `ieee14_wt3.xlsx` contains one generic Type-3 wind turbine
+
+- `ieee14_wt3n.xlsx` has (almost) all generators represented by Type-3 wind
+  turbines
+
+- `ieee14_solar.xlsx` contains a generic solar PV device, which can also be used
+  to model a Type-4 wind turbine
+
+- `ieee14_pvd1.xlsx` contains WECC distributed PV
+
+- `ieee14_dgprct1.xlsx` contains the WECC distributed PV model with IEEE
+  1547.2018-based voltage and frequency protection
+

@@ -17,10 +17,12 @@ class PowerSystemCoordinator:
         self.builder = builder
         self.system_data = builder.system_data
         self.n_gen = len(builder.generators)
+        self.n_ren = len(builder.ren_generators)  # REGCA1 converter units
 
         # Build mappings from JSON data
         self._build_bus_mapping()
         self._build_generator_mapping()
+        self._build_renewable_mapping()
         self._build_grid_mapping()
         self._build_load_mapping()
 
@@ -68,6 +70,31 @@ class PowerSystemCoordinator:
         # Unique generator bus indices (some buses may have multiple generators)
         self.unique_gen_buses = sorted(set(self.gen_bus_internal))
         self.n_gen_bus = len(self.unique_gen_buses)
+
+    def _build_renewable_mapping(self):
+        """Build renewable (converter) generator to bus mapping from REGCA1 data"""
+        self.ren_to_bus = {}
+        self.bus_to_rens = {}
+
+        for i, meta in enumerate(self.builder.ren_gen_metadata):
+            bus_idx = meta['bus']
+            self.ren_to_bus[i] = bus_idx
+
+            if bus_idx not in self.bus_to_rens:
+                self.bus_to_rens[bus_idx] = []
+            self.bus_to_rens[bus_idx].append(i)
+
+        # Get renewable bus internal indices
+        self.ren_bus_internal = [self.bus_idx_to_internal[self.ren_to_bus[i]]
+                                  for i in range(self.n_ren)]
+
+        # Unique renewable bus indices
+        self.unique_ren_buses = sorted(set(self.ren_bus_internal))
+        self.n_ren_bus = len(self.unique_ren_buses)
+
+        if self.n_ren > 0:
+            print(f"  Renewable converters: {self.n_ren} at buses "
+                  f"{[self.ren_to_bus[i] for i in range(self.n_ren)]}")
 
     def _build_grid_mapping(self):
         """Build grid/slack bus mapping from Slack data
@@ -205,8 +232,8 @@ class PowerSystemCoordinator:
         Keeps generator AND grid buses as active nodes.
         Eliminates load/non-active buses.
         """
-        # Identify active buses (generators + grids) and load buses
-        active_buses = sorted(set(self.unique_gen_buses + self.unique_grid_buses))
+        # Identify active buses (generators + renewables + grids) and load buses
+        active_buses = sorted(set(self.unique_gen_buses + self.unique_ren_buses + self.unique_grid_buses))
         load_buses = [i for i in range(self.n_bus) if i not in active_buses]
 
         n_a = len(active_buses)
@@ -219,6 +246,7 @@ class PowerSystemCoordinator:
             self.Ybus_reduced = self.Ybus_base[np.ix_(active_buses, active_buses)].copy()
             self.active_bus_to_reduced = {ab: i for i, ab in enumerate(active_buses)}
             self.gen_bus_to_reduced = {gb: active_buses.index(gb) for gb in self.unique_gen_buses}
+            self.ren_bus_to_reduced = {rb: active_buses.index(rb) for rb in self.unique_ren_buses}
             self.grid_bus_to_reduced = {gb: active_buses.index(gb) for gb in self.unique_grid_buses}
             return
 
@@ -250,6 +278,7 @@ class PowerSystemCoordinator:
         # Mapping from bus internal index to reduced matrix index
         self.active_bus_to_reduced = {ab: i for i, ab in enumerate(active_buses)}
         self.gen_bus_to_reduced = {gb: active_buses.index(gb) for gb in self.unique_gen_buses}
+        self.ren_bus_to_reduced = {rb: active_buses.index(rb) for rb in self.unique_ren_buses}
         self.grid_bus_to_reduced = {gb: active_buses.index(gb) for gb in self.unique_grid_buses}
 
     def apply_fault(self, bus_idx, impedance):
@@ -279,7 +308,7 @@ class PowerSystemCoordinator:
         Ybus_fault = self.apply_fault(bus_idx, impedance)
 
         # Re-do Kron reduction with faulted Ybus
-        gen_buses = self.unique_gen_buses
+        gen_buses = sorted(set(self.unique_gen_buses + self.unique_ren_buses))
         load_buses = [i for i in range(self.n_bus) if i not in gen_buses]
 
         if len(load_buses) == 0:
@@ -306,7 +335,8 @@ class PowerSystemCoordinator:
             Yll_inv = np.linalg.pinv(Yll)
             return Ygg - Ygl @ Yll_inv @ Ylg
 
-    def solve_network(self, gen_states, grid_voltages=None, Ybus=None, use_fault=False, fault_bus=None, fault_impedance=None):
+    def solve_network(self, gen_states, grid_voltages=None, ren_injections=None,
+                       Ybus=None, use_fault=False, fault_bus=None, fault_impedance=None):
         """
         Solve network with Park transformations using FULL network.
 
@@ -314,12 +344,17 @@ class PowerSystemCoordinator:
         1. Compute E'' from generator states
         2. Fix grid bus voltages (known boundary conditions)
         3. Inject current at generator buses into full network
-        4. Solve for non-grid bus voltages
-        5. Extract generator terminal voltages and currents
+        4. Inject converter (REGCA1) current at renewable buses
+        5. Solve for non-grid bus voltages
+        6. Extract generator terminal voltages and currents
 
         Args:
             gen_states: Generator states (n_gen x n_states_per_gen)
             grid_voltages: Complex voltage phasors for grid buses (n_grid,) - if None, no grid
+            ren_injections: List of dicts with 'Ip', 'Iq' for each renewable converter.
+                           Ip is active current (in-phase with V), Iq is reactive current
+                           (leading V by 90 deg, generator convention: Iq>0 = capacitive).
+                           If None, no renewable injection.
             Ybus: If provided, use this Ybus (for backward compatibility)
             use_fault: If True, apply fault
             fault_bus: Bus index for fault
@@ -327,6 +362,7 @@ class PowerSystemCoordinator:
 
         Returns:
             Id, Iq, Vd, Vq: Currents and voltages in machine frame for each generator
+            If renewables exist, also returns V_ren (complex terminal voltages at converter buses)
         """
         # Get full Ybus (with or without fault)
         if use_fault and fault_bus is not None:
@@ -400,6 +436,12 @@ class PowerSystemCoordinator:
 
         # Initialize voltage profile
         V_bus = np.ones(self.n_bus, dtype=complex)
+
+        # Renewable (converter) current injection - current source model
+        # REGCA1 injects Ip (active, in-phase with V) and Iq (reactive, leading V)
+        # I_ren = (Ip + jIq) * V/|V| in complex phasor
+        # On first iteration V is unknown, so we iterate
+        self._ren_injections = ren_injections  # Store for iterative update
         
         # Set grid bus voltages if provided (boundary conditions)
         grid_bus_indices = []
@@ -424,8 +466,21 @@ class PowerSystemCoordinator:
                     if abs(V_bus[lb]) > 0.1:
                         I_load[lb] = np.conj(S_load / V_bus[lb])
 
-            # Total current: generator injection minus load
-            I_total = I_inj - I_load
+            # Renewable current injection (depends on bus voltage direction)
+            I_ren = np.zeros(self.n_bus, dtype=complex)
+            if self._ren_injections is not None and self.n_ren > 0:
+                for i in range(self.n_ren):
+                    ren_bus = self.ren_bus_internal[i]
+                    Ip = self._ren_injections[i].get('Ip', 0.0)
+                    Iq = self._ren_injections[i].get('Iq', 0.0)
+                    # Current in network frame: I = (Ip + jIq) * V/|V|
+                    V_at_bus = V_bus[ren_bus]
+                    if abs(V_at_bus) > 0.1:
+                        V_unit = V_at_bus / abs(V_at_bus)
+                        I_ren[ren_bus] += (Ip + 1j * Iq) * V_unit
+
+            # Total current: generator injection + renewable injection minus load
+            I_total = I_inj + I_ren - I_load
 
             # If we have grid buses, solve only for non-grid buses
             if len(grid_bus_indices) > 0:
@@ -493,11 +548,18 @@ class PowerSystemCoordinator:
             Id[i] = i_r * np.sin(delta) - i_i * np.cos(delta)
             Iq[i] = i_r * np.cos(delta) + i_i * np.sin(delta)
 
-        return Id, Iq, Vd, Vq
+        # Get terminal voltages for renewable converters
+        V_ren = np.zeros(self.n_ren, dtype=complex)
+        for i in range(self.n_ren):
+            ren_bus = self.ren_bus_internal[i]
+            V_ren[i] = V_bus[ren_bus]
+
+        return Id, Iq, Vd, Vq, V_ren
 
     def get_bus_voltages(self, gen_states):
         """Get voltages at generator buses"""
-        Id, Iq, Vd, Vq = self.solve_network(gen_states)
+        result = self.solve_network(gen_states)
+        Id, Iq, Vd, Vq = result[0], result[1], result[2], result[3]
 
         V_mag = np.sqrt(Vd**2 + Vq**2)
         V_ang = np.arctan2(Vq, Vd) + gen_states[:, 0]
@@ -510,7 +572,11 @@ class PowerSystemCoordinator:
         print(f"Total buses: {self.n_bus}")
         print(f"Generator buses: {self.n_gen_bus}")
         print(f"Generators: {self.n_gen}")
-        print(f"Reduced network size: {self.n_gen_bus}x{self.n_gen_bus}")
+        if self.n_ren > 0:
+            print(f"Renewable buses: {self.n_ren_bus}")
+            print(f"Renewable converters: {self.n_ren}")
+        n_active = len(set(self.unique_gen_buses + self.unique_ren_buses + self.unique_grid_buses))
+        print(f"Reduced network size: {n_active}x{n_active}")
         print(f"Total load P: {np.sum(self.load_P):.2f} pu")
         print(f"Total load Q: {np.sum(self.load_Q):.2f} pu")
         print("========================\n")

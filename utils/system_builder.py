@@ -26,12 +26,30 @@ class PowerSystemBuilder:
         self.grids = []
         self.network = None
 
+        # Renewable component storage (WT3 sub-components)
+        self.ren_generators = []   # REGCA1 (converter interface)
+        self.ren_exciters = []     # REECA1 (electrical control)
+        self.ren_plants = []       # REPCA1 (plant controller)
+        self.ren_drivetrains = []  # WTDTA1 (drive train)
+        self.ren_aero = []         # WTARA1 (aerodynamics)
+        self.ren_pitch = []        # WTPTA1 (pitch control)
+        self.ren_torque = []       # WTTQA1 (torque control)
+
         # Metadata storage
         self.gen_metadata = []
         self.exc_metadata = []
         self.gov_metadata = []
         self.grid_metadata = []
         self.net_metadata = None
+
+        # Renewable metadata storage
+        self.ren_gen_metadata = []
+        self.ren_exc_metadata = []
+        self.ren_plant_metadata = []
+        self.ren_dt_metadata = []
+        self.ren_aero_metadata = []
+        self.ren_pitch_metadata = []
+        self.ren_torque_metadata = []
 
         # Build mappings
         self._build_mappings()
@@ -146,6 +164,9 @@ class PowerSystemBuilder:
         if total_grids == 0:
             print("  No true grid buses (all slacks are reference generators)")
 
+        # Dynamically build renewable components
+        self._build_renewables()
+
         # Build network
         print("  Building network from Line data...")
         self.network, self.net_metadata = self.factory.build_network(self.system_data)
@@ -153,6 +174,32 @@ class PowerSystemBuilder:
         print("Component build complete!")
         self._print_build_summary()
         return self
+
+    def _build_renewables(self):
+        """Build all renewable energy components from JSON data"""
+        ren_model_map = {
+            'REGCA1': ('ren_generators', 'ren_gen_metadata'),
+            'REECA1': ('ren_exciters', 'ren_exc_metadata'),
+            'REPCA1': ('ren_plants', 'ren_plant_metadata'),
+            'WTDTA1': ('ren_drivetrains', 'ren_dt_metadata'),
+            'WTARA1': ('ren_aero', 'ren_aero_metadata'),
+            'WTPTA1': ('ren_pitch', 'ren_pitch_metadata'),
+            'WTTQA1': ('ren_torque', 'ren_torque_metadata'),
+        }
+
+        total_ren = 0
+        for model_name, (core_list_name, meta_list_name) in ren_model_map.items():
+            data_list = self.system_data.get(model_name, [])
+            if data_list:
+                print(f"  Building {len(data_list)} {model_name} renewable components...")
+                for data in data_list:
+                    core, meta = self.factory.build_renewable(model_name, data, self.S_system)
+                    getattr(self, core_list_name).append(core)
+                    getattr(self, meta_list_name).append(meta)
+                    total_ren += 1
+
+        if total_ren > 0:
+            print(f"  Total renewable components: {total_ren}")
 
     def _print_build_summary(self):
         """Print summary of built components"""
@@ -165,14 +212,27 @@ class PowerSystemBuilder:
 
     def get_component_counts(self):
         """Return component counts"""
-        return {
+        counts = {
             'generators': len(self.generators),
             'exciters': len(self.exciters),
             'governors': len(self.governors),
             'grids': len(self.grids),
             'buses': self.net_metadata.get('n_bus', 0) if self.net_metadata else 0,
-            'network_lines': len(self.net_metadata.get('line_configs', [])) if self.net_metadata else 0
+            'network_lines': len(self.net_metadata.get('line_configs', [])) if self.net_metadata else 0,
+            'ren_generators': len(self.ren_generators),
+            'ren_exciters': len(self.ren_exciters),
+            'ren_plants': len(self.ren_plants),
+            'ren_drivetrains': len(self.ren_drivetrains),
+            'ren_aero': len(self.ren_aero),
+            'ren_pitch': len(self.ren_pitch),
+            'ren_torque': len(self.ren_torque),
         }
+        counts['total_renewables'] = sum([
+            counts['ren_generators'], counts['ren_exciters'], counts['ren_plants'],
+            counts['ren_drivetrains'], counts['ren_aero'], counts['ren_pitch'],
+            counts['ren_torque']
+        ])
+        return counts
 
     def get_total_states(self):
         """Calculate total number of states"""
@@ -182,6 +242,12 @@ class PowerSystemBuilder:
         n_states += sum(len(gov.x) for gov in self.governors)
         if self.network:
             n_states += len(self.network.x)
+        # Renewable component states
+        for ren_list in [self.ren_generators, self.ren_exciters, self.ren_plants,
+                         self.ren_drivetrains, self.ren_pitch, self.ren_torque]:
+            n_states += sum(c.n_states for c in ren_list)
+        # WTARA1 has 0 states (algebraic), but count anyway for safety
+        n_states += sum(c.n_states for c in self.ren_aero)
         return n_states
 
     def get_generator_bus_mapping(self):
@@ -225,6 +291,76 @@ class PowerSystemBuilder:
 
         return {'exciters': exciter_map, 'governors': governor_map}
 
+    def get_renewable_mapping(self):
+        """Return mapping of WT3 sub-components to each other.
+
+        The WT3 hierarchy is:
+          REPCA1 -> REECA1 -> REGCA1 -> Network bus
+          WTDTA1 (drive train) + WTARA1 (aero) + WTPTA1 (pitch) + WTTQA1 (torque)
+
+        Links are via 'ree' (REECA1 idx) and 'gen' (REGCA1 idx) fields in JSON.
+        """
+        mapping = []
+        for i, reg_meta in enumerate(self.ren_gen_metadata):
+            entry = {
+                'regca1_idx': i,
+                'bus': reg_meta.get('bus', None),
+                'reeca1_idx': None,
+                'repca1_idx': None,
+                'wtdta1_idx': None,
+                'wtara1_idx': None,
+                'wtpta1_idx': None,
+                'wttqa1_idx': None,
+            }
+            reg_json_idx = reg_meta.get('idx', None)
+            ree_json_idx = None  # Initialize before loop
+            aero_json_idx = None  # Initialize before loop
+
+            # Find REECA1 linked to this REGCA1
+            # REECA1 uses "reg" field to link to REGCA1
+            for j, ree_meta in enumerate(self.ren_exc_metadata):
+                if ree_meta.get('reg', None) == reg_json_idx:
+                    entry['reeca1_idx'] = j
+                    ree_json_idx = ree_meta.get('idx', None)
+
+                    # Find REPCA1 linked to this REECA1
+                    for k, rep_meta in enumerate(self.ren_plant_metadata):
+                        if rep_meta.get('ree', None) == ree_json_idx:
+                            entry['repca1_idx'] = k
+                            rep_json_idx = rep_meta.get('idx', None)
+                            
+                            # Find WTTQA1 linked to this REPCA1
+                            for m, torque_meta in enumerate(self.ren_torque_metadata):
+                                if torque_meta.get('rep', None) == rep_json_idx:
+                                    entry['wttqa1_idx'] = m
+                                    break
+                            break
+                    break
+
+            # Find WTDTA1 linked to REECA1
+            if ree_json_idx is not None:
+                for j, dt_meta in enumerate(self.ren_dt_metadata):
+                    if dt_meta.get('ree', None) == ree_json_idx:
+                        entry['wtdta1_idx'] = j
+                        break
+
+            # Find WTARA1 linked to REGCA1 (uses "rego" field)
+            for j, aero_meta in enumerate(self.ren_aero_metadata):
+                if aero_meta.get('rego', None) == reg_json_idx:
+                    entry['wtara1_idx'] = j
+                    aero_json_idx = aero_meta.get('idx', None)
+                    
+                    # Find WTPTA1 linked to WTARA1 (uses "rea" field)
+                    if aero_json_idx is not None:
+                        for k, pitch_meta in enumerate(self.ren_pitch_metadata):
+                            if pitch_meta.get('rea', None) == aero_json_idx:
+                                entry['wtpta1_idx'] = k
+                                break
+                    break
+
+            mapping.append(entry)
+        return mapping
+
     def get_line_data(self):
         """Return processed line data from network metadata"""
         if self.net_metadata:
@@ -256,6 +392,12 @@ class PowerSystemBuilder:
         print(f"Governors:  {counts['governors']}")
         print(f"Grids:      {counts['grids']}")
         print(f"Lines:      {counts['network_lines']}")
+        if counts['total_renewables'] > 0:
+            print(f"Renewables: {counts['total_renewables']} components")
+            print(f"  REGCA1: {counts['ren_generators']}, REECA1: {counts['ren_exciters']}, "
+                  f"REPCA1: {counts['ren_plants']}")
+            print(f"  WTDTA1: {counts['ren_drivetrains']}, WTARA1: {counts['ren_aero']}, "
+                  f"WTPTA1: {counts['ren_pitch']}, WTTQA1: {counts['ren_torque']}")
         print(f"Total states: {n_states}")
         print("-"*50)
 
@@ -266,6 +408,15 @@ class PowerSystemBuilder:
             exc_idx = control_map['exciters'].get(gen_idx, 'N/A')
             gov_idx = control_map['governors'].get(gen_idx, 'N/A')
             print(f"  Gen {gen_idx} -> Bus {bus_idx}, Exciter: {exc_idx}, Governor: {gov_idx}")
+
+        # Renewable details
+        if counts['total_renewables'] > 0:
+            print("\nRenewable Mapping:")
+            ren_map = self.get_renewable_mapping()
+            for entry in ren_map:
+                print(f"  REGCA1 {entry['regca1_idx']} -> Bus {entry['bus']}, "
+                      f"REECA1: {entry['reeca1_idx']}, REPCA1: {entry['repca1_idx']}, "
+                      f"WTDTA1: {entry['wtdta1_idx']}")
 
         print("="*50 + "\n")
 

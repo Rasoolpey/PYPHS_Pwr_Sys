@@ -1021,3 +1021,77 @@ To contribute new models or analysis tools:
 - Three impedance scanning methods
 - Fault simulation
 - JSON-based system configuration
+
+---
+
+## Renewable Energy Integration - Current Status (Feb 2026)
+
+### ✅ Completed Implementation
+
+The framework now includes a full Type-3 Wind Turbine (WT3) model with 7 sub-components:
+- **REGCA1** - Renewable Generator/Converter (current source inverter)
+- **REECA1** - Electrical Control (current command generation)
+- **REPCA1** - Plant Controller (plant-level P/Q control)
+- **WTDTA1** - Drive Train (two-mass mechanical model)
+- **WTARA1** - Aerodynamics (power vs pitch)
+- **WTPTA1** - Pitch Control
+- **WTTQA1** - Torque Control
+
+All models are implemented as Port-Hamiltonian systems in `components/renewables/`.
+
+**Key Infrastructure Updates:**
+- `component_factory.py` - Registers renewable models
+- `system_builder.py` - Builds and links WT3 sub-components  
+- `system_coordinator.py` - Handles converter current injection
+- `fault_sim_modular.py` - Integrates renewable dynamics
+- `power_flow.py` - Initializes renewable states
+
+**Test System:**
+- IEEE 14-bus with WT3 at bus 8 (replacing GENROU_5)
+- Configuration: `test_cases/ieee14bus/renewable_resources_adoption/ieee14_wt3_system.json`
+
+### ⚠️ Known Issue: Initialization Convergence
+
+**Problem:** The WT3 system has large initial derivatives (~3.7) in REPCA1 and REECA1 PI controller states, indicating the system is not at equilibrium.
+
+**Root Cause:** PI controllers in REPCA1/REECA1 require **integrator pre-loading** for equilibrium initialization. Currently, all PI integrators are initialized to zero, which assumes zero error. However, for a PI controller to produce a non-zero output with zero error, the integrator must be pre-loaded:
+
+```
+PI output = Kp * error + Ki * integrator
+At equilibrium (error=0): output_eq = Ki * integrator_eq
+Therefore: integrator_eq = output_eq / Ki
+```
+
+**Testing Evidence:**
+- Base IEEE 14-bus (no renewables): `Max |dx/dt| = 2.9e-13` ✅ Perfect
+- With WT3 (full controls): `Max |dx/dt| = 3.7` ❌ Poor
+- Largest derivatives in: REPCA1 Q-filter (-3.7), REECA1 V-filter (-3.6)
+
+### 🔧 Recommended Fixes
+
+**Option 1: Sophisticated Initialization (Recommended for production)**
+
+Update `init_fn` for REPCA1/REECA1 to:
+1. Calculate required outputs (Pext, Qext, Ipcmd, Iqcmd) from power flow
+2. Back-calculate PI integrator states to produce those outputs with zero error
+3. Handle cascaded control dependencies (REPCA1 → REECA1 → REGCA1)
+
+**Option 2: Reduced Control Authority (Quick fix for testing)**
+- Lower PI gains (Kp, Ki) in JSON to reduce initial transients
+- Use longer filter time constants (Trv, Tp, Tfltr)
+- This trades off control performance for stability
+
+**Option 3: Gradual Enablement (Practical approach)**
+- Start simulation with fixed current commands from power flow
+- Gradually ramp up control authority over first few seconds
+- Allows system to settle before full dynamic control engages
+
+**Option 4: Simplified Model (Development/testing)**
+- Test REGCA1 alone with fixed Ipcmd/Iqcmd from power flow
+- Add control layers incrementally: REECA1 → REPCA1 → Mechanical
+- Validate each layer separately before full integration
+
+### 📁 Related Files
+- Implementation: `components/renewables/*.py`
+- Test scripts: `test_renewable_initialization.py`, `test_renewable_simulation.py`
+- Configuration: `test_cases/ieee14bus/renewable_resources_adoption/`

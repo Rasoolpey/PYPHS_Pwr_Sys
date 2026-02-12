@@ -38,6 +38,15 @@ class ComponentFactory:
             
             # Grid elements
             'Slack': {'category': 'grid', 'module': 'infinite_bus'},
+
+            # Renewable energy components (Wind Turbine Type 3)
+            'REGCA1': {'category': 'renewable', 'module': 'regca1'},
+            'REECA1': {'category': 'renewable', 'module': 'reeca1'},
+            'REPCA1': {'category': 'renewable', 'module': 'repca1'},
+            'WTDTA1': {'category': 'renewable', 'module': 'wtdta1'},
+            'WTARA1': {'category': 'renewable', 'module': 'wtara1'},
+            'WTPTA1': {'category': 'renewable', 'module': 'wtpta1'},
+            'WTTQA1': {'category': 'renewable', 'module': 'wttqa1'},
         }
         
         # Reverse lookup: category -> list of model names
@@ -176,6 +185,26 @@ class ComponentFactory:
         build_func = getattr(module, f'build_{module_name}_core')
         return build_func(meas_data)
     
+    def build_renewable(self, model_type, ren_data, S_system=100.0):
+        """Build renewable energy component
+
+        Args:
+            model_type: str, e.g., 'REGCA1', 'WTDTA1'
+            ren_data: dict with parameters
+            S_system: system base power
+
+        Returns:
+            core, metadata
+        """
+        model_info = self.model_registry.get(model_type)
+        if not model_info or model_info['category'] != 'renewable':
+            raise ValueError(f"Unknown renewable model: {model_type}")
+
+        module_name = model_info['module']
+        module = importlib.import_module(f'components.renewables.{module_name}')
+        build_func = getattr(module, f'build_{module_name}_core')
+        return build_func(ren_data, S_system)
+
     def build_network(self, system_data):
         """Build network from system data
         
