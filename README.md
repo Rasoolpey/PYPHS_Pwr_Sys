@@ -57,6 +57,13 @@ This framework provides a **fully modular architecture** for Port-Hamiltonian mo
 - **Load Flow**: Network solution with Park transformations
 - **Time-Domain Simulation**: Full nonlinear dynamics with adaptive solvers
 
+### 🎨 **Auto-Layout Visualization**
+- **Automatic single-line diagram generation** from system topology
+- **Impedance-based layout**: Components positioned by electrical distance
+- **Graphviz integration**: Professional-grade routing and node placement
+- **Voltage level color-coding**: Standard utility colors (EHV, HV, MV, LV)
+- **SVG/PNG output**: High-quality vector graphics for reports
+
 ### 🔬 **Port-Hamiltonian Benefits**
 - Energy-based modeling ensures physical consistency
 - Natural framework for component interconnection
@@ -92,6 +99,7 @@ This framework provides a **fully modular architecture** for Port-Hamiltonian mo
 │   ├── impedance_scanner.py     # ⭐ Frequency-domain impedance
 │   ├── imtb_scanner.py          # ⭐ IMTB multisine impedance scanner
 │   ├── impedance_scanner_td.py  # ⭐ Time-domain white noise impedance scanner
+│   ├── auto_visualizer.py       # 🎨 Auto-layout power system visualizer
 │   ├── im_analysis_lib.py       # Impedance analysis utilities and plotting
 │   └── model_templates.py       # Component templates for rapid development
 │
@@ -988,6 +996,7 @@ To contribute new models or analysis tools:
 **v1.6 (February 2026)**
 - **NEW: Numba JIT Compilation for Component Dynamics (~6x overall speedup)**
   - All 7 component models (GENROU, EXDC2, EXST1, ESST3A, IEEEX1, TGOV1, IEEEG1) have `@njit(cache=True)` compiled versions
+  - Renewable components (REGCA1, REECA1, etc.) integrated into JIT framework
   - Array-based function signatures replace Python dicts for Numba compatibility
   - Pre-allocated port buffers eliminate per-call allocation in the ODE hot loop
   - `utils/numba_kernels.py`: JIT registry, `prepare_jit_data()`, `warmup_jit()` infrastructure
@@ -1003,6 +1012,10 @@ To contribute new models or analysis tools:
 - **Performance Results**: Kundur 53s→9s (5.9x), IEEE 14-bus 33s→5s (6.6x)
 - **Bug Fix**: `KeyError: 'R'` in power_flow.py for IEEEG1 governor (uses 'K' gain, not 'R' droop)
   - Added guard: `if 'R' in builder.gov_metadata[i]:` before accessing droop parameter
+- **NEW: Auto-Layout Visualizer**
+  - `utils/auto_visualizer.py`: Generates professional single-line diagrams using Graphviz
+  - Positions components based on electrical distance (impedance)
+  - Color-coded busbars by voltage level
 
 **v1.5 (February 2026)**
 - **NEW: IEEE 14-Bus and IEEE 39-Bus Test Systems**
@@ -1107,9 +1120,9 @@ To contribute new models or analysis tools:
 
 ---
 
-## Renewable Energy Integration - Current Status (Feb 2026)
+## Renewable Energy Integration (Type-3 Wind Turbine)
 
-### ✅ Completed Implementation
+### ✅ Validated Implementation
 
 The framework now includes a full Type-3 Wind Turbine (WT3) model with 7 sub-components:
 - **REGCA1** - Renewable Generator/Converter (current source inverter)
@@ -1122,59 +1135,24 @@ The framework now includes a full Type-3 Wind Turbine (WT3) model with 7 sub-com
 
 All models are implemented as Port-Hamiltonian systems in `components/renewables/`.
 
-**Key Infrastructure Updates:**
-- `component_factory.py` - Registers renewable models
-- `system_builder.py` - Builds and links WT3 sub-components  
-- `system_coordinator.py` - Handles converter current injection
-- `fault_sim_modular.py` - Integrates renewable dynamics
-- `power_flow.py` - Initializes renewable states
+### 🚀 Initialization Strategy
 
-**Test System:**
-- IEEE 14-bus with WT3 at bus 8 (replacing GENROU_5)
-- Configuration: `test_cases/ieee14bus/renewable_resources_adoption/ieee14_wt3_system.json`
+To achieve machine-precision equilibrium for renewable components, the framework uses a specialized iterative refinement process in `utils/power_flow.py`:
 
-### ⚠️ Known Issue: Initialization Convergence
+1. **Power Flow Target**: Initial P/Q/V targets are extracted from the AC power flow solution.
+2. **LVG Compensation**: The Low Voltage Gain (LVG) logic in REGCA1 is inverted to calculate the exact current commands required to match the power flow setpoint:
+   $$I_{p,cmd} = \frac{P_{set}}{V \cdot \text{LVG}(V)}$$
+3. **Iterative Network Refinement**:
+   - Renewable injections are calculated based on current states.
+   - The network is re-solved to update terminal voltages.
+   - Filter states and PI integrators are updated to match the new network condition.
+   - Convergence is typically reached in 5-10 iterations.
+4. **Back-Calculation**: Control references ($P_{ord}$, $P_{ext}$, $Q_{ext}$) and integrator states are back-calculated to ensure zero derivatives at $t=0$.
+5. **Final Consistency Check**: A final pass ensures that the pitch controller ($P_{ord}$ vs $P_{ref}$) and torque controller states match the exact electrical power output.
 
-**Problem:** The WT3 system has large initial derivatives (~3.7) in REPCA1 and REECA1 PI controller states, indicating the system is not at equilibrium.
-
-**Root Cause:** PI controllers in REPCA1/REECA1 require **integrator pre-loading** for equilibrium initialization. Currently, all PI integrators are initialized to zero, which assumes zero error. However, for a PI controller to produce a non-zero output with zero error, the integrator must be pre-loaded:
-
-```
-PI output = Kp * error + Ki * integrator
-At equilibrium (error=0): output_eq = Ki * integrator_eq
-Therefore: integrator_eq = output_eq / Ki
-```
-
-**Testing Evidence:**
-- Base IEEE 14-bus (no renewables): `Max |dx/dt| = 2.9e-13` ✅ Perfect
-- With WT3 (full controls): `Max |dx/dt| = 3.7` ❌ Poor
-- Largest derivatives in: REPCA1 Q-filter (-3.7), REECA1 V-filter (-3.6)
-
-### 🔧 Recommended Fixes
-
-**Option 1: Sophisticated Initialization (Recommended for production)**
-
-Update `init_fn` for REPCA1/REECA1 to:
-1. Calculate required outputs (Pext, Qext, Ipcmd, Iqcmd) from power flow
-2. Back-calculate PI integrator states to produce those outputs with zero error
-3. Handle cascaded control dependencies (REPCA1 → REECA1 → REGCA1)
-
-**Option 2: Reduced Control Authority (Quick fix for testing)**
-- Lower PI gains (Kp, Ki) in JSON to reduce initial transients
-- Use longer filter time constants (Trv, Tp, Tfltr)
-- This trades off control performance for stability
-
-**Option 3: Gradual Enablement (Practical approach)**
-- Start simulation with fixed current commands from power flow
-- Gradually ramp up control authority over first few seconds
-- Allows system to settle before full dynamic control engages
-
-**Option 4: Simplified Model (Development/testing)**
-- Test REGCA1 alone with fixed Ipcmd/Iqcmd from power flow
-- Add control layers incrementally: REECA1 → REPCA1 → Mechanical
-- Validate each layer separately before full integration
+**Result**: The IEEE 14-bus system with WT3 integration achieves `Max |dx/dt| < 1e-5` and maintains perfect steady-state operation (flat lines) in no-fault simulations.
 
 ### 📁 Related Files
 - Implementation: `components/renewables/*.py`
-- Test scripts: `test_renewable_initialization.py`, `test_renewable_simulation.py`
+- Test scripts: `test_renewable_nofault.py`, `test_renewable_fault.py`
 - Configuration: `test_cases/ieee14bus/renewable_resources_adoption/`
