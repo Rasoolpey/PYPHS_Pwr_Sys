@@ -1292,12 +1292,53 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
             reg_x_final = ren_state_lists[i][:3]
             reg_out_final = builder.ren_generators[i].output_fn(reg_x_final, {'V': V_actual}, reg_meta_temp)
             Pe_final = float(reg_out_final['Pe'])
+            Qe_final = float(reg_out_final['Qe'])
             
             if verbose and abs(Pe_final - P_set) > 1e-3:
                 print(f"  Ren {i}: Updated metadata - Iqcmd0={Iq_eq:.4f}, Ipcmd0={Ip_eq:.4f}, Vref0={V_actual:.4f}")
                 print(f"            WARNING: Pe={Pe_final:.4f} ≠ P_set={P_set:.3f}, error={Pe_final-P_set:.4f} pu")
             elif verbose:
                 print(f"  Ren {i}: Updated metadata - Iqcmd0={Iq_eq:.4f}, Ipcmd0={Ip_eq:.4f}, Vref0={V_actual:.4f}")
+            
+            # --- Final update of filter states to match EXACT output ---
+            # This eliminates residual derivatives (e.g. 3e-4) due to small convergence errors
+            
+            # Re-traverse mapping to find offsets
+            offset = 3 # After REGCA1
+            
+            # REECA1
+            if m.get('reeca1_idx') is not None:
+                ren_state_lists[i][offset] = V_actual      # Vf
+                ren_state_lists[i][offset + 1] = Pe_final  # Pf
+                offset += 4
+            
+            # REPCA1
+            if m.get('repca1_idx') is not None:
+                ren_state_lists[i][offset] = V_actual      # Vf
+                ren_state_lists[i][offset + 1] = Qe_final  # Qf
+                ren_state_lists[i][offset + 3] = Pe_final  # Pf
+                offset += 5
+            
+            # WTDTA1
+            dt_idx = m.get('wtdta1_idx')
+            if dt_idx is not None:
+                # Update shaft twist to match actual electrical torque
+                dt_meta = builder.ren_dt_metadata[dt_idx]
+                Kshaft = dt_meta.get('Kshaft', 1.0)
+                theta_tw_new = Pe_final / (1.0 * Kshaft) if Kshaft > 0 else 0.0
+                ren_state_lists[i][offset] = theta_tw_new
+                offset += 3
+            
+            # WTTQA1
+            tq_idx = m.get('wttqa1_idx')
+            if tq_idx is not None:
+                ren_state_lists[i][offset] = Pe_final  # Pef = Pe_final (Fixes state 70 derivative)
+                # Update speed filter if in power control mode
+                tq_meta = builder.ren_torque_metadata[tq_idx]
+                if tq_meta.get('Tflag', 0) > 0.5:
+                    from components.renewables.wttqa1 import wttqa1_piecewise_speed
+                    ren_state_lists[i][offset + 1] = wttqa1_piecewise_speed(Pe_final, tq_meta)
+                offset += 3
 
             # Update REECA1 metadata: Iqcmd0 must match equilibrium Iq
             # so that with QFLAG=0, Iqcmd = Iqcmd0 = Iq_eq (no derivative)
@@ -1429,15 +1470,38 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
 
                 # Re-initialize exciter with actual network quantities (GENERIC)
                 if exc_core.init_fn is not None:
-                    exc_x_refined = exc_core.init_fn(
-                        Efd_eq=Efd_actual,
-                        V_mag=Vt_actual,
-                        Vd=Vd_net[i],
-                        Vq=Vq_net[i],
-                        Id=Id_net[i],
-                        Iq=Iq_net[i],
-                        psi_f=psi_f_actual
-                    )
+                    # Iterative refinement to ensure output_fn matches Efd_actual (target)
+                    # This handles internal inconsistencies in exciter models (e.g. ESST3A)
+                    Efd_req = Efd_actual
+                    for iter_exc in range(10):
+                        exc_x_refined = exc_core.init_fn(
+                            Efd_eq=Efd_req,
+                            V_mag=Vt_actual,
+                            Vd=Vd_net[i],
+                            Vq=Vq_net[i],
+                            Id=Id_net[i],
+                            Iq=Iq_net[i],
+                            psi_f=psi_f_actual
+                        )
+                        
+                        # Verify output
+                        if exc_core.output_fn is not None:
+                            # Construct ports for output check
+                            exc_ports = {
+                                'Vt': Vt_actual, 'Vd': Vd_net[i], 'Vq': Vq_net[i],
+                                'Id': Id_net[i], 'Iq': Iq_net[i], 'XadIfd': psi_f_actual
+                            }
+                            Efd_out = exc_core.output_fn(exc_x_refined, exc_ports, exc_meta)
+                            
+                            error = Efd_out - Efd_actual
+                            if abs(error) < 1e-6:
+                                break
+                            
+                            # Simple feedback correction
+                            Efd_req -= error
+                        else:
+                            break
+
                     # Update exciter states
                     for j in range(exc_state_counts[i]):
                         machine_x[exc_offset + j] = exc_x_refined[j]
@@ -1485,6 +1549,97 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
                 if hasattr(gov_core, 'meta'):
                     gov_core.meta['Pref'] = Pm_adjusted
                     gov_core.meta['wref'] = 1.0
+
+        # ========================================================================
+        # PART 4.5: FINAL RENEWABLE STATE UPDATE (Post-Generator Adjustment)
+        # ========================================================================
+        # Generator psi_d/psi_q adjustments in Part 4 slightly change the network solution.
+        # We must update renewable filter states one last time to match the FINAL network voltage.
+        if n_ren > 0 and 'V_ren_net' in locals():
+            if verbose:
+                print(f"  Finalizing renewable states with adjusted network solution...")
+                
+            for i in range(n_ren):
+                m = ren_mapping[i]
+                # Get final voltage from Part 4 network solution
+                V_final = abs(V_ren_net[i])
+                
+                # Recalculate equilibrium currents with final voltage
+                # We need to retrieve P_set/Q_set again to ensure Ip/Iq match exactly
+                reg_meta = builder.ren_gen_metadata[i]
+                bus_idx = reg_meta['bus']
+                
+                # Retrieve setpoints (same logic as Part 3B)
+                pv_entries = {p['bus']: p for p in builder.system_data.get('PV', [])}
+                if bus_idx in pv_entries:
+                    P_set = pv_entries[bus_idx].get('p0', 0.0)
+                    Q_set = pv_entries[bus_idx].get('q0', 0.0)
+                else:
+                    P_set = 0.5
+                    Q_set = 0.0
+                
+                # Compute LVG at final voltage
+                Lvpnt0 = reg_meta.get('Lvpnt0', 0.4)
+                Lvpnt1 = reg_meta.get('Lvpnt1', 1.0)
+                if V_final <= Lvpnt0:
+                    LVG_y = 0.0
+                elif V_final <= Lvpnt1:
+                    LVG_y = (V_final - Lvpnt0) / (Lvpnt1 - Lvpnt0)
+                else:
+                    LVG_y = 1.0
+                LVG_y = max(LVG_y, 0.01)
+                
+                # Update REGCA1 states (Ip, Iq) to match P_set/Q_set at V_final
+                vp = max(V_final, 0.01)
+                Ip_new = P_set / (vp * LVG_y)
+                Iq_new = Q_set / vp
+                
+                ren_state_lists[i][0] = Ip_new
+                ren_state_lists[i][1] = Iq_new
+                
+                # Update REGCA1 metadata for command consistency
+                reg_meta['Ipcmd0'] = Ip_new
+                reg_meta['Iqcmd0'] = Iq_new
+                
+                # Recompute REGCA1 output with final voltage and new currents
+                reg_x = ren_state_lists[i][:3]
+                # Update REGCA1 voltage filter to match final voltage exactly
+                ren_state_lists[i][2] = V_final
+                
+                reg_core = builder.ren_generators[i]
+                reg_out = reg_core.output_fn(reg_x, {'V': V_final}, reg_meta)
+                Pe_final = float(reg_out['Pe'])
+                Qe_final = float(reg_out['Qe'])
+                
+                # Update filter states
+                offset = 3
+                
+                # REECA1
+                if m.get('reeca1_idx') is not None:
+                    ren_state_lists[i][offset] = V_final       # Vf
+                    ren_state_lists[i][offset + 1] = Pe_final  # Pf
+                    offset += 4
+                    
+                # REPCA1
+                if m.get('repca1_idx') is not None:
+                    ren_state_lists[i][offset] = V_final       # Vf
+                    ren_state_lists[i][offset + 1] = Qe_final  # Qf
+                    ren_state_lists[i][offset + 3] = Pe_final  # Pf
+                    offset += 5
+                    
+                # WTDTA1
+                dt_idx = m.get('wtdta1_idx')
+                if dt_idx is not None:
+                    dt_meta = builder.ren_dt_metadata[dt_idx]
+                    Kshaft = dt_meta.get('Kshaft', 1.0)
+                    theta_tw_new = Pe_final / (1.0 * Kshaft) if Kshaft > 0 else 0.0
+                    ren_state_lists[i][offset] = theta_tw_new
+                    offset += 3
+                    
+                # WTTQA1
+                tq_idx = m.get('wttqa1_idx')
+                if tq_idx is not None:
+                    ren_state_lists[i][offset] = Pe_final  # Pef
     
     # ========================================================================
     # PART 5: ASSEMBLE FINAL STATE VECTOR (fully generic)

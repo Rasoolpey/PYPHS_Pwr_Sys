@@ -765,40 +765,185 @@ class ModularFaultSimulator:
         )
 
         # Post-initialization equilibrium correction
-        # Correct psi_f to match exciter output, then Pref to match Te
-        # Fast states (VB_state T=0.01s, LG_y T=0.02s) settle during simulation
-        dxdt_corr = self.dynamics(0.0, x0)
-        for i in range(self.n_gen):
-            gs = self.machine_state_offsets[i]['gen_start']
-            gen_meta = self.builder.gen_metadata[i]
-            Td10 = gen_meta.get('Td10', 5.0)
-            dpsi_f = dxdt_corr[gs + 4]
-            if abs(dpsi_f) > 1e-6:
-                psi_f_old = x0[gs + 4]
-                x0[gs + 4] += dpsi_f * Td10
-                print(f"  Equilibrium fix: Gen {i} psi_f {psi_f_old:.6f} -> {x0[gs+4]:.6f} "
-                      f"(dpsi_f/dt was {dpsi_f:.3e})")
+        print("\nRefining equilibrium with full dynamics check...")
+        
+        for iter_refine in range(10):
+            # 1. Calculate derivatives
+            dxdt = self.dynamics(0.0, x0)
+            
+            # 2. Prepare network data for init_fn calls
+            # (Re-solve network to get V, I consistent with current states)
+            gen_states = []
+            for i in range(self.n_gen):
+                gs = self.machine_state_offsets[i]['gen_start']
+                gen_states.append(x0[gs:gs + self.gen_state_counts[i]])
+            gen_states_array = np.array([gx[:min(7, len(gx))] for gx in gen_states])
+            
+            x_grid = []
+            if self.n_grid > 0:
+                for i in range(self.n_grid):
+                    grid_start = self.grid_state_offset + sum(self.grid_state_counts[:i])
+                    x_grid.append(x0[grid_start:grid_start + self.grid_state_counts[i]])
+            
+            grid_voltages = None
+            if self.n_grid > 0:
+                grid_voltages = np.array([x_grid[i][0] * np.exp(1j * x_grid[i][1]) for i in range(self.n_grid)])
+                
+            ren_injections = None
+            if self.n_ren > 0:
+                ren_injections = []
+                for r in range(self.n_ren):
+                    u = self.ren_unit_offsets[r]
+                    reg_x = x0[u['regca1_start']:u['regca1_start'] + u['regca1_n']]
+                    reg_core = self.builder.ren_generators[r]
+                    reg_meta = self.builder.ren_gen_metadata[r]
+                    V_est = float(abs(reg_x[2])) if len(reg_x) >= 3 else 1.0
+                    V_est = V_est if V_est > 0.01 else 1.0
+                    reg_out = reg_core.output_fn(reg_x, {'V': V_est}, reg_meta)
+                    ren_injections.append({'Ip': reg_out['Ipout'], 'Iq': reg_out['Iqout']})
 
-        # Re-evaluate and correct Pref
-        dxdt_corr2 = self.dynamics(0.0, x0)
-        for i in range(self.n_gen):
-            gs = self.machine_state_offsets[i]['gen_start']
-            dp_dt = dxdt_corr2[gs + 1]
-            if abs(dp_dt) > 1e-6:
-                gov_meta = self.builder.gov_metadata[i]
-                gov_core = self.builder.governors[i]
-                Pref_old = gov_meta.get('Pref', 1.0)
-                Pref_new = Pref_old - dp_dt
-                gov_meta['Pref'] = Pref_new
-                if hasattr(gov_core, 'meta'):
-                    gov_core.meta['Pref'] = Pref_new
-                gov_offset = gs + self.gen_state_counts[i] + self.exc_state_counts[i]
-                if gov_core.init_fn is not None:
-                    gov_x = gov_core.init_fn(Pm_eq=Pref_new)
-                    for j in range(self.gov_state_counts[i]):
-                        x0[gov_offset + j] = gov_x[j]
-                print(f"  Equilibrium fix: Gen {i} Pref {Pref_old:.6f} -> {Pref_new:.6f} "
-                      f"(dp/dt was {dp_dt:.3e})")
+            Id, Iq, Vd, Vq, V_ren = self.coordinator.solve_network(
+                gen_states_array, grid_voltages=grid_voltages, ren_injections=ren_injections
+            )
+            
+            max_dpsi = 0.0
+            max_dp = 0.0
+            updates_made = False
+            
+            # 3. Correct Exciters (dpsi_f/dt -> Efd)
+            for i in range(self.n_gen):
+                gs = self.machine_state_offsets[i]['gen_start']
+                psi_f = x0[gs + 4]
+                gen_meta = self.builder.gen_metadata[i]
+                
+                # Calculate Kfd scaling factor
+                xd = gen_meta['xd']; xl = gen_meta['xl']; xd1 = gen_meta['xd1']
+                Xad = xd - xl
+                Xfl = (Xad * (xd1 - xl)) / (Xad - (xd1 - xl))
+                Kfd_scale = (Xad + Xfl) / max(Xad, 1e-6)
+                
+                # Target Efd to maintain current psi_f
+                Efd_target = psi_f / Kfd_scale
+                
+                exc_start = self.machine_state_offsets[i]['exc_start']
+                exc_core = self.builder.exciters[i]
+                exc_meta = self.builder.exc_metadata[i]
+                Vt = np.sqrt(Vd[i]**2 + Vq[i]**2)
+                
+                # Iteratively solve for exciter states that produce exactly Efd_target
+                # This handles non-linearities (like FEX in ESST3A) that cause init_fn mismatch
+                if exc_core.init_fn is not None:
+                    Efd_req = Efd_target
+                    best_exc_x = None
+                    best_err = 1e9
+                    
+                    for _ in range(15):  # Newton-like iteration
+                        exc_x_new = exc_core.init_fn(
+                            Efd_eq=Efd_req, V_mag=Vt, 
+                            Vd=Vd[i], Vq=Vq[i], Id=Id[i], Iq=Iq[i], psi_f=psi_f
+                        )
+                        
+                        # Check output
+                        exc_ports = {'Vt': Vt, 'Vd': Vd[i], 'Vq': Vq[i], 'Id': Id[i], 'Iq': Iq[i], 'XadIfd': psi_f}
+                        if exc_core.output_fn is not None:
+                            Efd_out = exc_core.output_fn(exc_x_new, exc_ports, exc_meta)
+                        else:
+                            Efd_out = exc_x_new[min(1, len(exc_x_new)-1)]
+                        
+                        err = Efd_out - Efd_target
+                        if abs(err) < best_err:
+                            best_err = abs(err)
+                            best_exc_x = exc_x_new
+                        
+                        if abs(err) < 1e-7:
+                            break
+                        
+                        # Feedback correction: if output is low, request more
+                        Efd_req = Efd_req - err
+
+                    # Update states with best found
+                    if best_exc_x is not None:
+                        x0[exc_start:exc_start + self.exc_state_counts[i]] = best_exc_x
+                        updates_made = True
+
+                    # Check final error
+                    Efd_err = Efd_out - Efd_target
+                    flux_err = abs(Efd_err * Kfd_scale)
+                    
+                    if flux_err > 1e-5:
+                        max_dpsi = max(max_dpsi, flux_err)
+                        
+                        # Check if limits are constraining the output and relax them if needed
+                        # This handles cases where JSON limits are too tight for the power flow solution
+                        if Efd_target > Efd_out and exc_core.model_name in ['ESST3A', 'EXST1', 'IEEEX1', 'EXDC2']:
+                            relaxed = False
+                            
+                            def relax_limit(key, target_val):
+                                if key in exc_meta:
+                                    # Relax if limit is less than target * 1.2 (headroom)
+                                    # Or if we are in a clamped state, just boost it significantly
+                                    if exc_meta[key] < target_val * 1.2:
+                                        old_lim = exc_meta[key]
+                                        new_lim = max(target_val * 1.5, old_lim * 1.5, 10.0)
+                                        exc_meta[key] = new_lim
+                                        print(f"    Gen {i}: Relaxing {key} {old_lim:.3f} -> {new_lim:.3f}")
+                                        return True
+                                return False
+
+                            # Relax limits that might be constraining Efd
+                            relaxed |= relax_limit('VRMAX', Efd_target)
+                            relaxed |= relax_limit('VMMAX', Efd_target)
+                            relaxed |= relax_limit('Efd_max', Efd_target)
+                            
+                            if exc_core.model_name == 'ESST3A':
+                                relaxed |= relax_limit('VGMAX', Efd_target)
+                                relaxed |= relax_limit('VBMAX', Efd_target)
+                                relaxed |= relax_limit('VIMAX', Efd_target)
+                            
+                            if relaxed:
+                                updates_made = True
+                                # Sync metadata if core has its own copy
+                                if hasattr(exc_core, 'metadata'):
+                                    exc_core.metadata.update(exc_meta)
+                                
+                                # Re-run init with new limits immediately
+                                if exc_core.init_fn is not None:
+                                    exc_x_new = exc_core.init_fn(
+                                        Efd_eq=Efd_target, V_mag=Vt, 
+                                        Vd=Vd[i], Vq=Vq[i], Id=Id[i], Iq=Iq[i], psi_f=psi_f
+                                    )
+                                    x0[exc_start:exc_start + self.exc_state_counts[i]] = exc_x_new
+
+                        if iter_refine == 0 and not updates_made:
+                            print(f"    Gen {i}: Exciter mismatch Efd {Efd_target:.4f} vs {Efd_out:.4f} (err={Efd_err:.1e})")
+            
+            # 4. Correct Governors (dp/dt -> Pref)
+            for i in range(self.n_gen):
+                gs = self.machine_state_offsets[i]['gen_start']
+                dp_dt = dxdt[gs + 1]
+                if abs(dp_dt) > 1e-6:
+                    max_dp = max(max_dp, abs(dp_dt))
+                    gov_meta = self.builder.gov_metadata[i]
+                    gov_core = self.builder.governors[i]
+                    Pref_old = gov_meta.get('Pref', 1.0)
+                    Pref_new = Pref_old - dp_dt
+                    
+                    gov_meta['Pref'] = Pref_new
+                    if hasattr(gov_core, 'meta'):
+                        gov_core.meta['Pref'] = Pref_new
+                    
+                    gov_start = self.machine_state_offsets[i]['gov_start']
+                    if gov_core.init_fn is not None:
+                        gov_x = gov_core.init_fn(Pm_eq=Pref_new)
+                        for j in range(self.gov_state_counts[i]):
+                            x0[gov_start + j] = gov_x[j]
+                    updates_made = True
+
+            if not updates_made:
+                print(f"  Converged in {iter_refine} iterations.")
+                break
+            
+            print(f"  Iter {iter_refine}: Max dpsi_f={max_dpsi:.3e}, Max dp={max_dp:.3e}")
 
         # Verify initial conditions quality
         print("\n" + "="*70)
