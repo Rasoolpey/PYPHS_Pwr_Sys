@@ -763,7 +763,43 @@ class ModularFaultSimulator:
             self.coordinator,
             verbose=True
         )
-        
+
+        # Post-initialization equilibrium correction
+        # Correct psi_f to match exciter output, then Pref to match Te
+        # Fast states (VB_state T=0.01s, LG_y T=0.02s) settle during simulation
+        dxdt_corr = self.dynamics(0.0, x0)
+        for i in range(self.n_gen):
+            gs = self.machine_state_offsets[i]['gen_start']
+            gen_meta = self.builder.gen_metadata[i]
+            Td10 = gen_meta.get('Td10', 5.0)
+            dpsi_f = dxdt_corr[gs + 4]
+            if abs(dpsi_f) > 1e-6:
+                psi_f_old = x0[gs + 4]
+                x0[gs + 4] += dpsi_f * Td10
+                print(f"  Equilibrium fix: Gen {i} psi_f {psi_f_old:.6f} -> {x0[gs+4]:.6f} "
+                      f"(dpsi_f/dt was {dpsi_f:.3e})")
+
+        # Re-evaluate and correct Pref
+        dxdt_corr2 = self.dynamics(0.0, x0)
+        for i in range(self.n_gen):
+            gs = self.machine_state_offsets[i]['gen_start']
+            dp_dt = dxdt_corr2[gs + 1]
+            if abs(dp_dt) > 1e-6:
+                gov_meta = self.builder.gov_metadata[i]
+                gov_core = self.builder.governors[i]
+                Pref_old = gov_meta.get('Pref', 1.0)
+                Pref_new = Pref_old - dp_dt
+                gov_meta['Pref'] = Pref_new
+                if hasattr(gov_core, 'meta'):
+                    gov_core.meta['Pref'] = Pref_new
+                gov_offset = gs + self.gen_state_counts[i] + self.exc_state_counts[i]
+                if gov_core.init_fn is not None:
+                    gov_x = gov_core.init_fn(Pm_eq=Pref_new)
+                    for j in range(self.gov_state_counts[i]):
+                        x0[gov_offset + j] = gov_x[j]
+                print(f"  Equilibrium fix: Gen {i} Pref {Pref_old:.6f} -> {Pref_new:.6f} "
+                      f"(dp/dt was {dp_dt:.3e})")
+
         # Verify initial conditions quality
         print("\n" + "="*70)
         print("  VERIFYING POWER FLOW BASED INITIAL CONDITIONS")

@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.25 (TeX Live 2023) (preloaded format=pdflatex 2023.8.17)  12 FEB 2026 19:48
+This is pdfTeX, Version 3.141592653-2.6-1.40.25 (TeX Live 2023) (preloaded format=pdflatex 2023.8.17)  13 FEB 2026 12:09
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -811,7 +811,7 @@ File: tikzlibrarypositioning.code.tex 2023-01-15 v3.1.10 (3.1.10)
 brarycalc.code.tex
 File: tikzlibrarycalc.code.tex 2023-01-15 v3.1.10 (3.1.10)
 )
-Package hyperref Info: Option `colorlinks' set `true' on input line 37.
+Package hyperref Info: Option `colorlinks' set `true' on input line 38.
  (c:/texlive/2023/texmf-dist/tex/latex/listings/lstlang1.sty
 File: lstlang1.sty 2023/02/27 1.9 listings language file
 ) (c:/texlive/2023/texmf-dist/tex/latex/l3backend/l3backend-pdftex.def
@@ -822,24 +822,24 @@ File: l3backend-pdftex.def 2023-01-16 L3 backend support: PDF output (pdfTeX)
 (./main.aux)
 \openout1 = `main.aux'.
 
-LaTeX Font Info:    Checking defaults for OML/cmm/m/it on input line 64.
-LaTeX Font Info:    ... okay on input line 64.
-LaTeX Font Info:    Checking defaults for OMS/cmsy/m/n on input line 64.
-LaTeX Font Info:    ... okay on input line 64.
-LaTeX Font Info:    Checking defaults for OT1/cmr/m/n on input line 64.
-LaTeX Font Info:    ... okay on input line 64.
-LaTeX Font Info:    Checking defaults for T1/cmr/m/n on input line 64.
-LaTeX Font Info:    ... okay on input line 64.
-LaTeX Font Info:    Checking defaults for TS1/cmr/m/n on input line 64.
-LaTeX Font Info:    ... okay on input line 64.
-LaTeX Font Info:    Checking defaults for OMX/cmex/m/n on input line 64.
-LaTeX Font Info:    ... okay on input line 64.
-LaTeX Font Info:    Checking defaults for U/cmr/m/n on input line 64.
-LaTeX Font Info:    ... okay on input line 64.
-LaTeX Font Info:    Checking defaults for PD1/pdf/m/n on input line 64.
-LaTeX Font Info:    ... okay on input line 64.
-LaTeX Font Info:    Checking defaults for PU/pdf/m/n on input line 64.
-LaTeX Font Info:    ... okay on input line 64.
+LaTeX Font Info:    Checking defaults for OML/cmm/m/it on input line 65.
+LaTeX Font Info:    ... okay on input line 65.
+LaTeX Font Info:    Checking defaults for OMS/cmsy/m/n on input line 65.
+LaTeX Font Info:    ... okay on input line 65.
+LaTeX Font Info:    Checking defaults for OT1/cmr/m/n on input line 65.
+LaTeX Font Info:    ... okay on input line 65.
+LaTeX Font Info:    Checking defaults for T1/cmr/m/n on input line 65.
+LaTeX Font Info:    ... okay on input line 65.
+LaTeX Font Info:    Checking defaults for TS1/cmr/m/n on input line 65.
+LaTeX Font Info:    ... okay on input line 65.
+LaTeX Font Info:    Checking defaults for OMX/cmex/m/n on input line 65.
+LaTeX Font Info:    ... okay on input line 65.
+LaTeX Font Info:    Checking defaults for U/cmr/m/n on input line 65.
+LaTeX Font Info:    ... okay on input line 65.
+LaTeX Font Info:    Checking defaults for PD1/pdf/m/n on input line 65.
+LaTeX Font Info:    ... okay on input line 65.
+LaTeX Font Info:    Checking defaults for PU/pdf/m/n on input line 65.
+LaTeX Font Info:    ... okay on input line 65.
  (c:/texlive/2023/texmf-dist/tex/context/base/mkii/supp-pdf.mkii
 [Loading MPS to PDF converter (version 2006.09.02).]
 \scratchcounter=\count337
@@ -896,7 +896,7 @@ e
 * \@reversemarginfalse
 * (1in=72.27pt=25.4mm, 1cm=28.453pt)
 
-Package hyperref Info: Link coloring ON on input line 64.
+Package hyperref Info: Link coloring ON on input line 65.
 (./main.out) (./main.out)
 \@outlinefile=\write4
 \openout4 = `main.out'.
@@ -904,13 +904,13 @@ Package hyperref Info: Link coloring ON on input line 64.
 \c@lstlisting=\count343
 Package caption Info: Begin \AtBeginDocument code.
 Package caption Info: End \AtBeginDocument code.
-LaTeX Font Info:    Trying to load font information for U+msa on input line 66.
+LaTeX Font Info:    Trying to load font information for U+msa on input line 67.
 
 
 (c:/texlive/2023/texmf-dist/tex/latex/amsfonts/umsa.fd
 File: umsa.fd 2013/01/14 v3.01 AMS symbols A
 )
-LaTeX Font Info:    Trying to load font information for U+msb on input line 66.
+LaTeX Font Info:    Trying to load font information for U+msb on input line 67.
 
 
 (c:/texlive/2023/texmf-dist/tex/latex/amsfonts/umsb.fd
@@ -923,30 +923,30 @@ texmf-dist/fonts/enc/dvips/cm-super/cm-super-t1.enc}])
 \openout5 = `main.toc'.
 
  [2]
-Overfull \hbox (1.15709pt too wide) in paragraph at lines 99--100
+Overfull \hbox (1.15709pt too wide) in paragraph at lines 100--101
 \T1/cmr/m/n/12 The pro-posed frame-work im-ple-ments the PHS for-mu-la-tion thr
 ough a mod-u-lar, component-
  []
 
 LaTeX Font Info:    Trying to load font information for T1+cmtt on input line 1
-02.
+03.
 (c:/texlive/2023/texmf-dist/tex/latex/base/t1cmtt.fd
 File: t1cmtt.fd 2022/07/10 v2.5l Standard LaTeX font definitions
 )
-Overfull \hbox (0.10443pt too wide) in paragraph at lines 104--105
+Overfull \hbox (0.10443pt too wide) in paragraph at lines 105--106
 \T1/cmr/m/n/12 citers, gov-er-nors, re-new-able en-ergy con-vert-ers) each im-p
 le-mented as a \T1/cmtt/m/n/12 DynamicsCore
  []
 
 
-Overfull \hbox (11.97592pt too wide) in paragraph at lines 104--105
+Overfull \hbox (11.97592pt too wide) in paragraph at lines 105--106
 \T1/cmr/m/n/12 meta-data. Com-po-nents are self-describing through at-tributes:
  \T1/cmtt/m/n/12 n_states\T1/cmr/m/n/12 , \T1/cmtt/m/n/12 model_name\T1/cmr/m/n
 /12 ,
  []
 
 
-Overfull \hbox (33.66417pt too wide) in paragraph at lines 108--109
+Overfull \hbox (33.66417pt too wide) in paragraph at lines 109--110
 []\T1/cmr/bx/n/12 Simulation Layer \T1/cmr/m/n/12 (\T1/cmtt/m/n/12 system_coord
 inator.py\T1/cmr/m/n/12 , \T1/cmtt/m/n/12 fault_sim_modular.py\T1/cmr/m/n/12 , 
 \T1/cmtt/m/n/12 power_flow.py\T1/cmr/m/n/12 ):
@@ -954,45 +954,83 @@ inator.py\T1/cmr/m/n/12 , \T1/cmtt/m/n/12 fault_sim_modular.py\T1/cmr/m/n/12 ,
 
 [3] [4] [5] [6] [7] [8{c:/texlive/2023/texmf-dist/fonts/enc/dvips/cm-super/cm-s
 uper-ts1.enc}] [9] [10]
-Overfull \hbox (1.25598pt too wide) in paragraph at lines 466--467
+Overfull \hbox (1.25598pt too wide) in paragraph at lines 467--468
 []\T1/cmr/bx/n/12 WTARA1 \T1/cmr/m/n/12 (al-ge-braic): Aero-dy-nam-ics model co
 m-put-ing aero-dy-namic power $\OML/cmm/m/it/12 P[] \OT1/cmr/m/n/12 =
  []
 
 [11] [12] [13] [14]
 Package hyperref Info: bookmark level for unknown lstlisting defaults to 0 on i
-nput line 678.
- [15] [16]
-Overfull \hbox (8.82352pt too wide) in paragraph at lines 782--783
+nput line 693.
+ [15]
+<Figures//kundur_fault_simulation.png, id=503, 1084.05pt x 578.16pt>
+File: Figures//kundur_fault_simulation.png Graphic file (type png)
+<use Figures//kundur_fault_simulation.png>
+Package pdftex.def Info: Figures//kundur_fault_simulation.png  used on input li
+ne 766.
+(pdftex.def)             Requested size: 455.24411pt x 242.79907pt.
+ [16 <./Figures//kundur_fault_simulation.png>]
+<Figures//ieee14_nofault_equilibrium.png, id=513, 1084.05pt x 578.16pt>
+File: Figures//ieee14_nofault_equilibrium.png Graphic file (type png)
+<use Figures//ieee14_nofault_equilibrium.png>
+Package pdftex.def Info: Figures//ieee14_nofault_equilibrium.png  used on input
+ line 783.
+(pdftex.def)             Requested size: 455.24411pt x 242.79907pt.
+<Figures//ieee14_fault_simulation.png, id=514, 1084.05pt x 578.16pt>
+File: Figures//ieee14_fault_simulation.png Graphic file (type png)
+<use Figures//ieee14_fault_simulation.png>
+Package pdftex.def Info: Figures//ieee14_fault_simulation.png  used on input li
+ne 790.
+(pdftex.def)             Requested size: 455.24411pt x 242.79907pt.
+ [17 <./Figures//ieee14_nofault_equilibrium.png>]
+<Figures//ieee39_nofault_equilibrium.png, id=522, 1084.05pt x 578.16pt>
+File: Figures//ieee39_nofault_equilibrium.png Graphic file (type png)
+<use Figures//ieee39_nofault_equilibrium.png>
+Package pdftex.def Info: Figures//ieee39_nofault_equilibrium.png  used on input
+ line 806.
+(pdftex.def)             Requested size: 455.24411pt x 242.79907pt.
+ [18 <./Figures//ieee14_fault_simulation.png>]
+<Figures//ieee39_fault_simulation.png, id=529, 1084.05pt x 578.16pt>
+File: Figures//ieee39_fault_simulation.png Graphic file (type png)
+<use Figures//ieee39_fault_simulation.png>
+Package pdftex.def Info: Figures//ieee39_fault_simulation.png  used on input li
+ne 813.
+(pdftex.def)             Requested size: 455.24411pt x 242.79907pt.
+ [19 <./Figures//ieee39_nofault_equilibrium.png> <./Figures//ieee39_fault_simul
+ation.png>]
+Overfull \hbox (8.82352pt too wide) in paragraph at lines 832--833
  []\T1/cmr/bx/n/12 Post-Fault Re-cov-ery.[] \T1/cmr/m/n/12 Fol-low-ing a three-
 phase fault (typ-i-cally $\OML/cmm/m/it/12 Z[] \OT1/cmr/m/n/12 = 0\OML/cmm/m/it
 /12 :\OT1/cmr/m/n/12 01\OML/cmm/m/it/12 j []$ \T1/cmr/m/n/12 for 150 ms),
  []
 
+<Figures//stability_visualization.png, id=540, 965.0454pt x 743.4174pt>
+File: Figures//stability_visualization.png Graphic file (type png)
+<use Figures//stability_visualization.png>
+Package pdftex.def Info: Figures//stability_visualization.png  used on input li
+ne 836.
+(pdftex.def)             Requested size: 455.24411pt x 350.68805pt.
 
-Overfull \hbox (0.89732pt too wide) in paragraph at lines 790--791
+Overfull \hbox (0.89732pt too wide) in paragraph at lines 847--848
 \T1/cmr/m/n/12 This pa-per pre-sented the method-ol-ogy and im-ple-men-ta-tion 
 of a mod-u-lar Port-Hamiltonian
  []
 
 
-Overfull \hbox (103.27356pt too wide) in paragraph at lines 793--794
+Overfull \hbox (103.27356pt too wide) in paragraph at lines 850--851
 \T1/cmr/m/n/12 machine sys-tems with het-ero-ge-neous com-po-nent mod-els (GEN-
 ROU, EXDC2/EXST1/ESST3A/IEEEX1
  []
 
-[17] [18] (./main.aux)
-
-LaTeX Warning: Label(s) may have changed. Rerun to get cross-references right.
-
+[20 <./Figures//stability_visualization.png>] [21] [22] (./main.aux)
 Package rerunfilecheck Info: File `main.out' has not changed.
 (rerunfilecheck)             Checksum: 3EE3733DCF9C300299E11ABB6F994504;9978.
  ) 
 Here is how much of TeX's memory you used:
- 28666 strings out of 476025
- 528050 string characters out of 5794015
+ 28747 strings out of 476025
+ 530582 string characters out of 5794015
  1898382 words of memory out of 5000000
- 48435 multiletter control sequences out of 15000+600000
+ 48498 multiletter control sequences out of 15000+600000
  537836 words of font info for 99 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
  84i,14n,80p,634b,1350s stack positions out of 10000i,1000n,20000p,200000b,200000s
@@ -1020,10 +1058,10 @@ e1/public/cm-super/sfrm2074.pfb><c:/texlive/2023/texmf-dist/fonts/type1/public/
 cm-super/sfti1200.pfb><c:/texlive/2023/texmf-dist/fonts/type1/public/cm-super/s
 ftt1095.pfb><c:/texlive/2023/texmf-dist/fonts/type1/public/cm-super/sftt1200.pf
 b>
-Output written on main.pdf (18 pages, 496942 bytes).
+Output written on main.pdf (22 pages, 2330876 bytes).
 PDF statistics:
- 701 PDF objects out of 1000 (max. 8388607)
- 621 compressed objects within 7 object streams
- 227 named destinations out of 1000 (max. 500000)
- 437 words of extra memory for PDF output out of 10000 (max. 10000000)
+ 739 PDF objects out of 1000 (max. 8388607)
+ 643 compressed objects within 7 object streams
+ 237 named destinations out of 1000 (max. 500000)
+ 467 words of extra memory for PDF output out of 10000 (max. 10000000)
 

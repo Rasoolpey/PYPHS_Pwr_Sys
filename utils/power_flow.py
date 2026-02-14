@@ -1384,16 +1384,31 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
                 machine_x[2] = psi_d_new
                 machine_x[3] = psi_q_new
 
+        # Re-solve network with ADJUSTED psi_d/psi_q to get consistent quantities
+        # (The first solve used old gen_states; now psi_d/psi_q have been updated)
+        gen_states_adj = []
+        for machine_x0 in machine_state_lists:
+            gen_x = machine_x0[:min(7, len(machine_x0))].copy()
+            if len(gen_x) < 7:
+                gen_x = np.concatenate([gen_x, np.zeros(7 - len(gen_x))])
+            gen_states_adj.append(gen_x)
+        gen_states_adj = np.array(gen_states_adj)
+
+        Id_net, Iq_net, Vd_net, Vq_net, V_ren_net = coordinator.solve_network(
+            gen_states_adj, grid_voltages=grid_voltages, ren_injections=ren_injections_final
+        )
+        P_elec = Vd_net * Id_net + Vq_net * Iq_net
+
         # Refine exciter states using actual network quantities (FULLY GENERIC)
         for i in range(n_gen):
             if exc_state_counts[i] > 0:
                 exc_core = builder.exciters[i]
                 exc_meta = builder.exc_metadata[i]
                 gen_meta = builder.gen_metadata[i]
-                
+
                 # Compute actual terminal voltage magnitude from network solution
                 Vt_actual = np.sqrt(Vd_net[i]**2 + Vq_net[i]**2)
-                
+
                 # Recompute Efd_target from actual psi_f (may have been adjusted)
                 xd = gen_meta['xd']
                 xl = gen_meta['xl']
@@ -1403,15 +1418,15 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
                 Lf = Xad + Xfl
                 Xad_safe = max(Xad, 1e-6)
                 Kfd_scale = Lf / Xad_safe
-                
+
                 # Calculate state offsets within this machine's state vector
                 n_gen_states_i = gen_state_counts[i]
                 exc_offset = n_gen_states_i
-                
+
                 machine_x = machine_state_lists[i]
                 psi_f_actual = machine_x[4]  # Generator state 4
                 Efd_actual = psi_f_actual / Kfd_scale
-                
+
                 # Re-initialize exciter with actual network quantities (GENERIC)
                 if exc_core.init_fn is not None:
                     exc_x_refined = exc_core.init_fn(
@@ -1428,14 +1443,14 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
                         machine_x[exc_offset + j] = exc_x_refined[j]
                     # Vref was already set correctly by init_fn (includes voltage
                     # error offset). Do NOT overwrite to Vt_actual.
-                    
+
                     if verbose:
                         print(f"  Gen {i}: {exc_core.model_name} refined with actual network V/I")
                 else:
                     # Fallback: just update voltage measurement
                     machine_x[exc_offset + 0] = Vt_actual
 
-
+        # (Exciter-psi_f consistency is handled by verifying VB_state matches VB during dynamics)
 
         # Adjust mechanical power to match electrical power (generic for heterogeneous governors)
         for i in range(n_gen):
@@ -1443,17 +1458,17 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
                 n_gen_states_i = gen_state_counts[i]
                 n_exc_states_i = exc_state_counts[i]
                 gov_offset = n_gen_states_i + n_exc_states_i
-                
+
                 machine_x = machine_state_lists[i]
                 gov_core = builder.governors[i]
                 gov_meta = builder.gov_metadata[i]
-                
+
                 # Use solved electrical air-gap power as target (magnitude)
                 Pm_adjusted = abs(P_elec[i])
                 if verbose and P_elec[i] < 0:
                     gen_type = "SLACK" if i in slack_gen_indices else "PV"
                     print(f"  Gen {i} ({gen_type}): Pe negative, using |Pe| -> {Pm_adjusted:.3f}")
-                
+
                 # Generic governor adjustment: re-initialize with adjusted Pm
                 if gov_core.init_fn is not None:
                     gov_x_adjusted = gov_core.init_fn(Pm_eq=Pm_adjusted)
@@ -1463,7 +1478,7 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
                     # Fallback: set all states to Pm_adjusted
                     for j in range(gov_state_counts[i]):
                         machine_x[gov_offset + j] = Pm_adjusted
-                
+
                 # Update both builder metadata and core metadata so droop uses the solved setpoint
                 builder.gov_metadata[i]['Pref'] = Pm_adjusted
                 builder.gov_metadata[i]['wref'] = 1.0

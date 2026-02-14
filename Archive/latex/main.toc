@@ -58,11 +58,11 @@
 \contentsline {subsection}{\numberline {9.3}Performance Results}{16}{subsection.9.3}%
 \contentsline {section}{\numberline {10}Test Systems and Validation}{16}{section.10}%
 \contentsline {subsection}{\numberline {10.1}Kundur Two-Area Four-Machine System}{16}{subsection.10.1}%
-\contentsline {subsection}{\numberline {10.2}IEEE 14-Bus System}{16}{subsection.10.2}%
-\contentsline {subsection}{\numberline {10.3}IEEE 39-Bus (New England) System}{16}{subsection.10.3}%
-\contentsline {subsection}{\numberline {10.4}Validation Criteria}{17}{subsection.10.4}%
-\contentsline {paragraph}{Equilibrium Accuracy.}{17}{section*.15}%
-\contentsline {paragraph}{No-Fault Steady State.}{17}{section*.16}%
-\contentsline {paragraph}{JIT vs. Non-JIT Consistency.}{17}{section*.17}%
-\contentsline {paragraph}{Post-Fault Recovery.}{17}{section*.18}%
-\contentsline {section}{\numberline {11}Summary}{17}{section.11}%
+\contentsline {subsection}{\numberline {10.2}IEEE 14-Bus System}{17}{subsection.10.2}%
+\contentsline {subsection}{\numberline {10.3}IEEE 39-Bus (New England) System}{18}{subsection.10.3}%
+\contentsline {subsection}{\numberline {10.4}Validation Criteria}{19}{subsection.10.4}%
+\contentsline {paragraph}{Equilibrium Accuracy.}{19}{section*.20}%
+\contentsline {paragraph}{No-Fault Steady State.}{20}{section*.21}%
+\contentsline {paragraph}{JIT vs. Non-JIT Consistency.}{20}{section*.22}%
+\contentsline {paragraph}{Post-Fault Recovery.}{20}{section*.23}%
+\contentsline {section}{\numberline {11}Summary}{20}{section.11}%

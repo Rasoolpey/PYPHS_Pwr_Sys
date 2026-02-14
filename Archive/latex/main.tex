@@ -9,6 +9,7 @@
 \usepackage{mathtools}
 \usepackage{bm}
 \usepackage{graphicx}
+\graphicspath{{Figures/}}
 \usepackage{booktabs}
 \usepackage{multirow}
 \usepackage{array}
@@ -466,6 +467,20 @@ where $\omega_t = p_t/J_t$, $\omega_g = p_g/J_g$, $K_{\text{sh}}$ is the shaft s
     \item \textbf{WTARA1} (algebraic): Aerodynamics model computing aerodynamic power $P_{\text{aero}} = f(\omega_t, \theta)$ from lookup tables.
 \end{itemize}
 
+%\begin{figure}[H]
+%    \centering
+%    \includegraphics[width=\textwidth]{renewable_nofault_simulation.png}
+%    \caption{Type-3 wind turbine: No-fault steady-state validation showing stable operation of the WT3 model with all 21 states maintaining equilibrium over 30~s.}
+%    \label{fig:renewable_nofault}
+%\end{figure}
+%
+%\begin{figure}[H]
+%    \centering
+%    \includegraphics[width=\textwidth]{renewable_fault_simulation.png}
+%    \caption{Type-3 wind turbine: Fault response showing active/reactive current dynamics, converter voltage, drive train oscillations, and pitch controller response during and after a grid fault.}
+%    \label{fig:renewable_fault}
+%\end{figure}
+
 
 % ============================================================
 \section{Network Solution}
@@ -746,6 +761,13 @@ The Kundur two-area system~\cite{kundur1994} is a widely used benchmark for inte
     \item State dimension: 52 (7 gen + 4 exc + 2 gov per machine)
 \end{itemize}
 
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{kundur_fault_simulation.png}
+    \caption{Kundur two-area system: Three-phase fault simulation results showing rotor angles, generator speeds, terminal voltages, and field voltages. A 150~ms fault is applied at $t = 1$~s, demonstrating inter-area oscillations and post-fault recovery.}
+    \label{fig:kundur_fault}
+\end{figure}
+
 \subsection{IEEE 14-Bus System}
 
 The IEEE 14-bus system provides validation for heterogeneous component configurations:
@@ -756,6 +778,20 @@ The IEEE 14-bus system provides validation for heterogeneous component configura
     \item State dimension: 85 (varying per machine)
 \end{itemize}
 
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{ieee14_nofault_equilibrium.png}
+    \caption{IEEE 14-bus system: No-fault equilibrium validation showing steady-state generator variables over 15~s. Rotor angles and speeds remain constant, confirming accurate initialization.}
+    \label{fig:ieee14_nofault}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{ieee14_fault_simulation.png}
+    \caption{IEEE 14-bus system: Three-phase fault simulation results with heterogeneous exciter (ESST3A, EXST1) and governor (IEEEG1, TGOV1) models. Post-fault oscillations are well damped.}
+    \label{fig:ieee14_fault}
+\end{figure}
+
 \subsection{IEEE 39-Bus (New England) System}
 
 The IEEE 39-bus system tests scalability:
@@ -764,6 +800,20 @@ The IEEE 39-bus system tests scalability:
     \item All ESST3A exciters, all IEEEG1 governors
     \item State dimension: 180
 \end{itemize}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{ieee39_nofault_equilibrium.png}
+    \caption{IEEE 39-bus (New England) system: No-fault equilibrium validation with 10 generators, confirming accurate initialization across all machines.}
+    \label{fig:ieee39_nofault}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{ieee39_fault_simulation.png}
+    \caption{IEEE 39-bus system: Three-phase fault simulation showing transient response of all 10 generators. The system recovers synchronism with damped oscillations after fault clearance.}
+    \label{fig:ieee39_fault}
+\end{figure}
 
 \subsection{Validation Criteria}
 
@@ -780,6 +830,13 @@ The implementation is validated against the following criteria:
 \paragraph{JIT vs. Non-JIT Consistency.} The maximum absolute difference between JIT and dictionary-based simulation results should be $< 10^{-5}$ over the entire trajectory, confirming numerical equivalence.
 
 \paragraph{Post-Fault Recovery.} Following a three-phase fault (typically $Z_f = 0.01j\pu$ for 150~ms), all generators should recover synchronism with damped oscillations, demonstrating transient stability.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{stability_visualization.png}
+    \caption{Stability visualization showing the energy-based stability analysis using the Hamiltonian as a Lyapunov function. The PHS framework enables direct assessment of system stability margins through energy dissipation monitoring.}
+    \label{fig:stability}
+\end{figure}
 
 
 % ============================================================
