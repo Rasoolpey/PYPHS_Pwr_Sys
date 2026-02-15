@@ -1382,6 +1382,106 @@ class ModularFaultSimulator:
         # --- Wind Turbine (WT3) dynamics plots ---
         if self.n_ren > 0:
             self._plot_renewable_results(sol, filename, output_dir)
+        
+        # Plot VOC inverter dynamics
+        if self.n_voc > 0:
+            self._plot_voc_results(sol, filename, output_dir)
+
+    def _plot_voc_results(self, sol, filename, output_dir):
+        """Plot VOC (Virtual Oscillator Control) inverter dynamics."""
+        import matplotlib.pyplot as plt
+        
+        t = sol.t
+        x_hist = sol.y.T  # (n_time, n_states)
+        
+        for v in range(self.n_voc):
+            voc_offset = self.voc_offsets[v]
+            voc_meta = self.builder.ren_voc_metadata[v]
+            voc_idx = voc_meta['idx']
+            voc_bus = voc_meta['bus']
+            
+            # Extract VOC state histories
+            start = voc_offset['start']
+            u_mag_hist = x_hist[:, start + 0]      # Output voltage magnitude
+            theta_hist = x_hist[:, start + 1]      # Output voltage angle
+            Pf_hist = x_hist[:, start + 2]         # Filtered active power
+            Qf_hist = x_hist[:, start + 3]         # Filtered reactive power
+            
+            # Compute frequency from angle derivative
+            omega_voc = np.zeros_like(t)
+            omega_voc[0] = 1.0  # Initial frequency
+            for i in range(1, len(t)):
+                dt_step = t[i] - t[i-1]
+                if dt_step > 0:
+                    dtheta = theta_hist[i] - theta_hist[i-1]
+                    omega_voc[i] = 1.0 + dtheta / (2 * np.pi * 60 * dt_step)  # In pu
+            
+            # Convert angle to degrees for plotting
+            theta_deg_hist = np.rad2deg(theta_hist)
+            
+            # Create figure with VOC-specific plots
+            fig, axes = plt.subplots(3, 2, figsize=(12, 10))
+            fig.suptitle(f'VOC Inverter Dynamics - {voc_idx} at Bus {voc_bus}', fontsize=14, fontweight='bold')
+            
+            # Plot 1: Output Voltage Magnitude
+            axes[0, 0].plot(t, u_mag_hist, 'b-', linewidth=1.5)
+            axes[0, 0].axhline(y=voc_meta['u_ref'], color='r', linestyle='--', linewidth=1, label='Reference')
+            axes[0, 0].set_ylabel('Voltage (pu)')
+            axes[0, 0].set_title('Output Voltage Magnitude')
+            axes[0, 0].grid(True, alpha=0.3)
+            axes[0, 0].legend()
+            
+            # Plot 2: Output Voltage Angle
+            axes[0, 1].plot(t, theta_deg_hist, 'g-', linewidth=1.5)
+            axes[0, 1].set_ylabel('Angle (deg)')
+            axes[0, 1].set_title('Output Voltage Angle')
+            axes[0, 1].grid(True, alpha=0.3)
+            
+            # Plot 3: Active Power
+            axes[1, 0].plot(t, Pf_hist, 'r-', linewidth=1.5)
+            axes[1, 0].axhline(y=voc_meta['Pref'], color='k', linestyle='--', linewidth=1, label='Reference')
+            axes[1, 0].set_ylabel('Power (pu)')
+            axes[1, 0].set_title('Active Power Output')
+            axes[1, 0].grid(True, alpha=0.3)
+            axes[1, 0].legend()
+            
+            # Plot 4: Reactive Power
+            axes[1, 1].plot(t, Qf_hist, 'm-', linewidth=1.5)
+            axes[1, 1].axhline(y=voc_meta['Qref'], color='k', linestyle='--', linewidth=1, label='Reference')
+            axes[1, 1].set_ylabel('Power (pu)')
+            axes[1, 1].set_title('Reactive Power Output')
+            axes[1, 1].grid(True, alpha=0.3)
+            axes[1, 1].legend()
+            
+            # Plot 5: Frequency
+            axes[2, 0].plot(t, omega_voc, 'c-', linewidth=1.5)
+            axes[2, 0].axhline(y=1.0, color='k', linestyle='--', linewidth=1, label='Nominal')
+            axes[2, 0].set_xlabel('Time (s)')
+            axes[2, 0].set_ylabel('Frequency (pu)')
+            axes[2, 0].set_title('VOC Frequency (from P-f droop)')
+            axes[2, 0].grid(True, alpha=0.3)
+            axes[2, 0].legend()
+            
+            # Plot 6: Apparent Power
+            S_hist = np.sqrt(Pf_hist**2 + Qf_hist**2)
+            axes[2, 1].plot(t, S_hist, 'orange', linewidth=1.5, label='|S|')
+            axes[2, 1].plot(t, Pf_hist, 'r-', linewidth=1, alpha=0.7, label='P')
+            axes[2, 1].plot(t, Qf_hist, 'm-', linewidth=1, alpha=0.7, label='Q')
+            axes[2, 1].set_xlabel('Time (s)')
+            axes[2, 1].set_ylabel('Power (pu)')
+            axes[2, 1].set_title('Apparent Power |S|')
+            axes[2, 1].grid(True, alpha=0.3)
+            axes[2, 1].legend()
+            
+            plt.tight_layout()
+            
+            # Save figure
+            voc_filename = filename.replace('.png', f'_voc{v+1}.png')
+            output_path = f"{output_dir}/{voc_filename}"
+            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            print(f"  VOC plot saved: {output_path}")
 
     def _plot_renewable_results(self, sol, filename, output_dir):
         """Plot wind turbine (WT3) sub-component dynamics."""

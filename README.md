@@ -1030,6 +1030,15 @@ To contribute new models or analysis tools:
   - Each generator swing equation referenced to COI frequency instead of fixed 1.0 pu
   - Automatically redistributes any net system acceleration proportionally to generator inertias
   - Critical for simulations with renewable integration where power balance may have small numerical errors
+- **NEW: Grid-Forming (GFM) Inverter - Virtual Oscillator Control (VOC)** ⚠️ Experimental
+  - Implements nonlinear oscillator-based grid-forming control
+  - 4-state model: voltage magnitude, phase angle, filtered P, filtered Q
+  - P-f droop provides virtual inertia (H_virtual ≈ 1/(2πf × mp))
+  - Q-V droop with pump/damp switching for voltage regulation
+  - Network coupling: voltage source behind output filter (LC)
+  - Automatic VOC-specific plotting (6-panel diagnostics)
+  - **Status**: Functional but exhibits power oscillations (under investigation)
+  - See `Todo/TODO.md` for known issues and proposed solutions
 - **Performance Optimization for Fault Simulations**
   - Added `max_step` parameter to Radau solver to prevent excessive time step refinement
   - Default: 10ms max step during faults (balances accuracy vs speed)
@@ -1043,6 +1052,7 @@ To contribute new models or analysis tools:
   - Added comprehensive renewable integration case study (IEEE 14-bus + WT3)
   - Detailed analysis of inertia reduction effects on system damping
   - Guidelines for critical clearing time with reduced system inertia
+  - Added VOC implementation guide and troubleshooting
 
 **v1.6 (February 2026)**
 - **NEW: Numba JIT Compilation for Component Dynamics (~6x overall speedup)**
@@ -1237,3 +1247,141 @@ To achieve machine-precision equilibrium for renewable components, the framework
 - Test scripts: `test_renewable_nofault.py`, `test_renewable_fault.py`
 - Configuration: `test_cases/ieee14bus/renewable_resources_adoption/`
 - **Case Study**: `test_cases/ieee14bus/renewable_resources_adoption/README_WT3_CASE_STUDY.md`
+
+---
+
+## Grid-Forming (GFM) Inverter - Virtual Oscillator Control (VOC)
+
+### 🔬 Implementation Status: **Experimental**
+
+The framework includes a **Virtual Oscillator Control (VOC)** grid-forming inverter model that mimics synchronous generator behavior through nonlinear oscillator dynamics.
+
+### What is VOC?
+
+Virtual Oscillator Control is a grid-forming control strategy that:
+- **Acts as voltage source** behind output filter impedance (like synchronous generator behind Xd')
+- **Provides virtual inertia** through P-f droop: frequency responds to power imbalance
+- **Self-synchronizes** with the grid using nonlinear oscillator dynamics
+- **No PLL required** - inherently stable synchronization mechanism
+
+### VOC Model Structure
+
+**4-State Model** (`components/renewables/voc_inverter.py`):
+1. `u_mag`: Output voltage magnitude (pu)
+2. `theta`: Virtual oscillator phase angle (rad)
+3. `Pf`: Filtered active power (pu)
+4. `Qf`: Filtered reactive power (pu)
+
+**Control Laws**:
+```python
+# P-f Droop (provides virtual inertia)
+dθ/dt = ω0 + mp * (Pref - Pf)
+
+# Q-V Droop (voltage regulation)
+du/dt = xi1 * (u_ref - u) + xi2 * (Qref - Qf)
+
+# Power measurement (LPF)
+dPf/dt = ω_lpf * (P_inst - Pf)
+dQf/dt = ω_lpf * (Q_inst - Qf)
+```
+
+**Key Parameters**:
+- `mp`: P-f droop gain (typ. 0.01-0.05 for 1-5% droop) → **Virtual inertia: H ≈ 1/(2πf_base × mp)**
+- `xi1`: Voltage regulation gain (typ. 0.05-0.2)
+- `xi2`: Q-V droop gain with pump/damp switching (typ. 0.3-1.0)
+- `ω_lpf`: Power measurement filter cutoff (typ. 10-100 rad/s)
+
+### Network Coupling
+
+**Voltage Source Behind Impedance**:
+```python
+# VOC voltage injection (Norton equivalent)
+u_voc = u_mag * (cos(theta) + j*sin(theta))  # VOC output voltage
+Z_filt = Rf + jωLf                            # Output filter impedance
+I_inj = (u_voc - V_bus) * Y_filt             # Injected current to network
+```
+
+This couples the VOC to the network as a **controlled voltage source** through the output filter, exactly like a synchronous generator with `E'` behind `Xd'`.
+
+### Virtual Inertia Comparison
+
+| Parameter | Typical Synchronous Gen | VOC (mp=0.05) |
+|-----------|------------------------|---------------|
+| Droop (%) | 3-5% | 5% |
+| Inertia H (seconds) | 2-8s | ~3.2s |
+| Response Time | Mechanical (slow) | Electronic (fast) |
+
+**Note**: VOC provides **emulated inertia**, not true rotating mass. The droop gain `mp` determines the equivalent inertia constant: `H_virtual ≈ 1/(2π × 60 Hz × mp)`.
+
+### Test Cases
+
+**No-Fault Equilibrium**:
+```bash
+python test_voc_nofault.py  # IEEE 14-bus with VOC at Bus 8
+```
+
+**Fault Response**:
+```bash
+python test_voc_fault.py    # 3-phase fault with GFM inverter
+```
+
+### Configuration Example
+
+```json
+{
+  "VOC_INVERTER": [
+    {
+      "idx": "VOC_1",
+      "bus": 8,
+      "Sn": 100.0,
+      "Lf": 0.08,
+      "Cf": 0.074,
+      "Rf": 0.01,
+      "u_ref": 1.03,
+      "omega0": 1.0,
+      "xi1": 0.06,
+      "xi2": 0.42,
+      "mp": 0.05,
+      "omega_lpf": 62.83,
+      "Pref": 0.35,
+      "Qref": 0.074
+    }
+  ]
+}
+```
+
+### Plotting VOC Dynamics
+
+VOC inverters automatically generate detailed 6-panel plots showing:
+- Output voltage magnitude and angle
+- Active and reactive power output
+- Frequency (from P-f droop)
+- Apparent power |S|
+
+Plots saved as: `outputs/simulation_name_voc1.png`
+
+### ⚠️ Known Issues (Under Investigation)
+
+**Current Status**: VOC implementation is **functional but exhibits oscillations** in power output. The system generators remain stable, but VOC power oscillates with period ~6-7 seconds.
+
+**Symptoms**:
+- Active power oscillates ±0.35 pu around setpoint
+- Voltage magnitude varies 0.75-1.25 pu
+- Initialization shows large transients (dPf/dt ≈ -10 to -20 at t=0)
+
+**Possible Causes** (under investigation):
+- Current direction sign convention mismatch
+- Reference frame synchronization with COI
+- P-f droop gain tuning
+- Q-V control pump/damp switching
+- Filter drop compensation
+
+See `Todo/TODO.md` for detailed analysis and proposed solutions.
+
+### 📁 Related Files
+- Implementation: `components/renewables/voc_inverter.py`
+- Test scripts: `test_voc_nofault.py`, `test_voc_fault.py`
+- Configuration: `test_cases/ieee14bus/renewable_resources_adoption/ieee14_voc_system.json`
+- **Issues & Solutions**: `Todo/TODO.md`
+
+---
