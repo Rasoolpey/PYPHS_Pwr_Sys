@@ -102,6 +102,7 @@ class ModularFaultSimulator:
         self.n_gen = len(self.builder.generators)
         self.n_grid = len(self.builder.grids)
         self.n_ren = len(self.builder.ren_generators)  # Number of WT3 converter units
+        self.n_voc = len(self.builder.ren_voc)  # Number of VOC inverters
 
         # Dynamically determine state counts from actual components using n_states attribute
         if len(self.builder.generators) > 0:
@@ -134,6 +135,10 @@ class ModularFaultSimulator:
         # Renewable states come after grid states
         self.ren_state_offset = offset
         self._build_renewable_state_map(offset)
+        
+        # VOC states come after WT3 renewable states
+        self.voc_state_offset = offset
+        self._build_voc_state_map(offset)
 
         # Base frequency
         self.omega_b = 2 * np.pi * 60
@@ -156,7 +161,7 @@ class ModularFaultSimulator:
         self._extract_initial_conditions()
 
         print(f"\nModular Fault Simulator: {self.n_gen} generators, {self.n_grid} grids, "
-              f"{self.n_ren} renewables, {self.total_states} states")
+              f"{self.n_ren} WT3 renewables, {self.n_voc} VOC inverters, {self.total_states} states")
         print(f"  Component states per machine: Gen={self.gen_state_counts}, Exc={self.exc_state_counts}, Gov={self.gov_state_counts}")
         if len(self.builder.exciters) > 0:
             exc_models = set(exc.model_name for exc in self.builder.exciters)
@@ -238,6 +243,29 @@ class ModularFaultSimulator:
             unit['total'] = offset - unit['start']
             self.ren_unit_offsets.append(unit)
 
+        self.total_states = offset
+    
+    def _build_voc_state_map(self, offset):
+        """Build state offset map for VOC inverters.
+        
+        Each VOC inverter has 4 states: [u_mag, theta, Pf, Qf]
+        VOC is a single component (unlike WT3 which has 7 sub-components).
+        """
+        self.voc_offsets = []  # Per VOC unit state offsets
+        
+        for v in range(self.n_voc):
+            voc_meta = self.builder.ren_voc_metadata[v]
+            n_states = voc_meta.get('n_states', 4)
+            
+            voc_unit = {
+                'start': offset,
+                'n_states': n_states,
+                'bus': voc_meta['bus'],
+                'idx': voc_meta['idx']
+            }
+            offset += n_states
+            self.voc_offsets.append(voc_unit)
+        
         self.total_states = offset
 
     def _load_simulation_config(self, simulation_json):
@@ -468,7 +496,7 @@ class ModularFaultSimulator:
             grid_voltages = np.array([x_grid[i][0] * np.exp(1j * x_grid[i][1]) 
                                       for i in range(self.n_grid)])
 
-        # Extract renewable states
+        # Extract renewable states (WT3)
         ren_states = {}  # keyed by sub-component type per unit
         for r in range(self.n_ren):
             u = self.ren_unit_offsets[r]

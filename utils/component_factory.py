@@ -47,6 +47,9 @@ class ComponentFactory:
             'WTARA1': {'category': 'renewable', 'module': 'wtara1'},
             'WTPTA1': {'category': 'renewable', 'module': 'wtpta1'},
             'WTTQA1': {'category': 'renewable', 'module': 'wttqa1'},
+            
+            # Virtual Oscillator Control (VOC) Grid-Forming Inverter
+            'VOC_INVERTER': {'category': 'renewable', 'module': 'voc_inverter'},
         }
         
         # Reverse lookup: category -> list of model names

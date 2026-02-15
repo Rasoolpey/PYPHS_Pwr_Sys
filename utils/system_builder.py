@@ -26,7 +26,7 @@ class PowerSystemBuilder:
         self.grids = []
         self.network = None
 
-        # Renewable component storage (WT3 sub-components)
+        # Renewable component storage (WT3 sub-components + GFM)
         self.ren_generators = []   # REGCA1 (converter interface)
         self.ren_exciters = []     # REECA1 (electrical control)
         self.ren_plants = []       # REPCA1 (plant controller)
@@ -34,6 +34,7 @@ class PowerSystemBuilder:
         self.ren_aero = []         # WTARA1 (aerodynamics)
         self.ren_pitch = []        # WTPTA1 (pitch control)
         self.ren_torque = []       # WTTQA1 (torque control)
+        self.ren_voc = []          # VOC_INVERTER (Virtual Oscillator Control grid-forming)
 
         # Metadata storage
         self.gen_metadata = []
@@ -50,6 +51,7 @@ class PowerSystemBuilder:
         self.ren_aero_metadata = []
         self.ren_pitch_metadata = []
         self.ren_torque_metadata = []
+        self.ren_voc_metadata = []
 
         # Build mappings
         self._build_mappings()
@@ -185,6 +187,7 @@ class PowerSystemBuilder:
             'WTARA1': ('ren_aero', 'ren_aero_metadata'),
             'WTPTA1': ('ren_pitch', 'ren_pitch_metadata'),
             'WTTQA1': ('ren_torque', 'ren_torque_metadata'),
+            'VOC_INVERTER': ('ren_voc', 'ren_voc_metadata'),
         }
 
         total_ren = 0
@@ -226,11 +229,12 @@ class PowerSystemBuilder:
             'ren_aero': len(self.ren_aero),
             'ren_pitch': len(self.ren_pitch),
             'ren_torque': len(self.ren_torque),
+            'ren_voc': len(self.ren_voc),
         }
         counts['total_renewables'] = sum([
             counts['ren_generators'], counts['ren_exciters'], counts['ren_plants'],
             counts['ren_drivetrains'], counts['ren_aero'], counts['ren_pitch'],
-            counts['ren_torque']
+            counts['ren_torque'], counts['ren_voc']
         ])
         return counts
 
