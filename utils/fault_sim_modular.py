@@ -248,7 +248,7 @@ class ModularFaultSimulator:
     def _build_voc_state_map(self, offset):
         """Build state offset map for VOC inverters.
         
-        Each VOC inverter has 4 states: [u_mag, theta, Pf, Qf]
+        Each VOC inverter has 4 states: [u_mag, delta_voc, Pf, Qf]
         VOC is a single component (unlike WT3 which has 7 sub-components).
         """
         self.voc_offsets = []  # Per VOC unit state offsets
@@ -549,20 +549,20 @@ class ModularFaultSimulator:
                 voc_x = voc_states[v]
                 voc_meta = self.builder.ren_voc_metadata[v]
                 
-                # VOC states: [u_mag, theta, Pf, Qf]
+                # VOC states: [u_mag, delta_voc, Pf, Qf]
                 u_mag = voc_x[0]
-                theta = voc_x[1]
+                theta = voc_x[1]  # delta_voc: angle in synchronous frame
                 
                 # Convert polar to αβ (Cartesian) for network injection
                 u_a = u_mag * np.cos(theta)
                 u_b = u_mag * np.sin(theta)
                 
-                # Output filter admittance: Y_filt = 1 / (Rf + j*omega*Lf)
+                # Output filter admittance: Y_filt = 1 / (Rf + j*omega0*Lf)
+                # All quantities are in per-unit; omega0 = 1.0 pu is base frequency
                 Rf = voc_meta.get('Rf', 0.01)
                 Lf = voc_meta.get('Lf', 0.08)
                 omega0 = voc_meta.get('omega0', 1.0)  # pu frequency
-                omega_rad = omega0 * 2 * np.pi * 60  # rad/s (system base)
-                Z_filt = Rf + 1j * omega_rad * Lf
+                Z_filt = Rf + 1j * omega0 * Lf  # pu impedance
                 y_filt = 1.0 / Z_filt if abs(Z_filt) > 1e-6 else 1.0
                 
                 voc_voltages.append({
@@ -968,19 +968,15 @@ class ModularFaultSimulator:
         # Post-initialization equilibrium correction
         print("\nRefining equilibrium with full dynamics check...")
         
-        # Special handling for VOC: check derivatives excluding frequency (dtheta/dt = omega0)
+        # Special handling for VOC: With synchronous-frame angle (delta_voc),
+        # d(delta_voc)/dt = 0 at equilibrium, so no masking needed
         for iter_refine in range(10):
             # 1. Calculate derivatives
             dxdt = self.dynamics(0.0, x0)
             
-            # For VOC, dtheta/dt = omega0 is correct (not an error)
-            # Mask out VOC frequency derivatives from max check
+            # All derivatives should be near zero at equilibrium
+            # (including VOC delta_voc which is now in synchronous frame)
             dxdt_check = dxdt.copy()
-            if self.n_voc > 0:
-                for v in range(self.n_voc):
-                    voc_offset = self.voc_offsets[v]
-                    theta_idx = voc_offset['start'] + 1  # theta is state 1
-                    dxdt_check[theta_idx] = 0.0  # Mask frequency derivative
             
             # 2. Prepare network data for init_fn calls
             # (Re-solve network to get V, I consistent with current states)
@@ -1180,13 +1176,8 @@ class ModularFaultSimulator:
         
         dx0_check = self.dynamics(0.0, x0)
         
-        # Mask VOC frequency derivatives (dtheta/dt = omega0 is correct, not an error)
+        # Mask VOC frequency derivatives not needed: delta_voc has d/dt=0 at equilibrium
         dx0_check_masked = dx0_check.copy()
-        if self.n_voc > 0:
-            for v in range(self.n_voc):
-                voc_offset = self.voc_offsets[v]
-                theta_idx = voc_offset['start'] + 1
-                dx0_check_masked[theta_idx] = 0.0
         
         max_deriv = np.max(np.abs(dx0_check_masked))
         mean_deriv = np.mean(np.abs(dx0_check_masked))
@@ -1201,7 +1192,7 @@ class ModularFaultSimulator:
             for v in range(self.n_voc):
                 voc_offset = self.voc_offsets[v]
                 voc_dxdt = dx0_check[voc_offset['start']:voc_offset['start']+4]
-                print(f"  VOC {v+1} derivatives: du/dt={voc_dxdt[0]:.3e}, dtheta/dt={voc_dxdt[1]:.3e}, dPf/dt={voc_dxdt[2]:.3e}, dQf/dt={voc_dxdt[3]:.3e}")
+                print(f"  VOC {v+1} derivatives: du/dt={voc_dxdt[0]:.3e}, d_delta/dt={voc_dxdt[1]:.3e}, dPf/dt={voc_dxdt[2]:.3e}, dQf/dt={voc_dxdt[3]:.3e}")
         
         # Identify which component has the largest derivative
         offset = 0
@@ -1442,10 +1433,6 @@ class ModularFaultSimulator:
         # --- Wind Turbine (WT3) dynamics plots ---
         if self.n_ren > 0:
             self._plot_renewable_results(sol, filename, output_dir)
-        
-        # Plot VOC inverter dynamics
-        if self.n_voc > 0:
-            self._plot_voc_results(sol, filename, output_dir)
 
     def _plot_voc_results(self, sol, filename, output_dir):
         """Plot VOC (Virtual Oscillator Control) inverter dynamics."""
@@ -1462,22 +1449,23 @@ class ModularFaultSimulator:
             
             # Extract VOC state histories
             start = voc_offset['start']
-            u_mag_hist = x_hist[:, start + 0]      # Output voltage magnitude
-            theta_hist = x_hist[:, start + 1]      # Output voltage angle
-            Pf_hist = x_hist[:, start + 2]         # Filtered active power
-            Qf_hist = x_hist[:, start + 3]         # Filtered reactive power
+            u_mag_hist = x_hist[:, start + 0]       # Output voltage magnitude
+            delta_hist = x_hist[:, start + 1]       # Angle deviation from synchronous (rad)
+            Pf_hist = x_hist[:, start + 2]          # Filtered active power
+            Qf_hist = x_hist[:, start + 3]          # Filtered reactive power
             
             # Compute frequency from angle derivative
-            omega_voc = np.zeros_like(t)
-            omega_voc[0] = 1.0  # Initial frequency
+            # delta_voc is deviation from synchronous; d(delta)/dt = droop deviation
+            omega_voc = np.ones_like(t)  # 1.0 pu = nominal
             for i in range(1, len(t)):
                 dt_step = t[i] - t[i-1]
                 if dt_step > 0:
-                    dtheta = theta_hist[i] - theta_hist[i-1]
-                    omega_voc[i] = 1.0 + dtheta / (2 * np.pi * 60 * dt_step)  # In pu
+                    d_delta = delta_hist[i] - delta_hist[i-1]
+                    # Convert rate to pu frequency deviation via omega_b
+                    omega_voc[i] = 1.0 + d_delta / (2 * np.pi * 60 * dt_step)
             
             # Convert angle to degrees for plotting
-            theta_deg_hist = np.rad2deg(theta_hist)
+            delta_deg_hist = np.rad2deg(delta_hist)
             
             # Create figure with VOC-specific plots
             fig, axes = plt.subplots(3, 2, figsize=(12, 10))
@@ -1491,106 +1479,10 @@ class ModularFaultSimulator:
             axes[0, 0].grid(True, alpha=0.3)
             axes[0, 0].legend()
             
-            # Plot 2: Output Voltage Angle
-            axes[0, 1].plot(t, theta_deg_hist, 'g-', linewidth=1.5)
+            # Plot 2: Angle Deviation (synchronous frame)
+            axes[0, 1].plot(t, delta_deg_hist, 'g-', linewidth=1.5)
             axes[0, 1].set_ylabel('Angle (deg)')
-            axes[0, 1].set_title('Output Voltage Angle')
-            axes[0, 1].grid(True, alpha=0.3)
-            
-            # Plot 3: Active Power
-            axes[1, 0].plot(t, Pf_hist, 'r-', linewidth=1.5)
-            axes[1, 0].axhline(y=voc_meta['Pref'], color='k', linestyle='--', linewidth=1, label='Reference')
-            axes[1, 0].set_ylabel('Power (pu)')
-            axes[1, 0].set_title('Active Power Output')
-            axes[1, 0].grid(True, alpha=0.3)
-            axes[1, 0].legend()
-            
-            # Plot 4: Reactive Power
-            axes[1, 1].plot(t, Qf_hist, 'm-', linewidth=1.5)
-            axes[1, 1].axhline(y=voc_meta['Qref'], color='k', linestyle='--', linewidth=1, label='Reference')
-            axes[1, 1].set_ylabel('Power (pu)')
-            axes[1, 1].set_title('Reactive Power Output')
-            axes[1, 1].grid(True, alpha=0.3)
-            axes[1, 1].legend()
-            
-            # Plot 5: Frequency
-            axes[2, 0].plot(t, omega_voc, 'c-', linewidth=1.5)
-            axes[2, 0].axhline(y=1.0, color='k', linestyle='--', linewidth=1, label='Nominal')
-            axes[2, 0].set_xlabel('Time (s)')
-            axes[2, 0].set_ylabel('Frequency (pu)')
-            axes[2, 0].set_title('VOC Frequency (from P-f droop)')
-            axes[2, 0].grid(True, alpha=0.3)
-            axes[2, 0].legend()
-            
-            # Plot 6: Apparent Power
-            S_hist = np.sqrt(Pf_hist**2 + Qf_hist**2)
-            axes[2, 1].plot(t, S_hist, 'orange', linewidth=1.5, label='|S|')
-            axes[2, 1].plot(t, Pf_hist, 'r-', linewidth=1, alpha=0.7, label='P')
-            axes[2, 1].plot(t, Qf_hist, 'm-', linewidth=1, alpha=0.7, label='Q')
-            axes[2, 1].set_xlabel('Time (s)')
-            axes[2, 1].set_ylabel('Power (pu)')
-            axes[2, 1].set_title('Apparent Power |S|')
-            axes[2, 1].grid(True, alpha=0.3)
-            axes[2, 1].legend()
-            
-            plt.tight_layout()
-            
-            # Save figure
-            voc_filename = filename.replace('.png', f'_voc{v+1}.png')
-            output_path = f"{output_dir}/{voc_filename}"
-            plt.savefig(output_path, dpi=150, bbox_inches='tight')
-            plt.close()
-            
-            print(f"  VOC plot saved: {output_path}")
-
-    def _plot_voc_results(self, sol, filename, output_dir):
-        """Plot VOC (Virtual Oscillator Control) inverter dynamics."""
-        import matplotlib.pyplot as plt
-        
-        t = sol.t
-        x_hist = sol.y.T  # (n_time, n_states)
-        
-        for v in range(self.n_voc):
-            voc_offset = self.voc_offsets[v]
-            voc_meta = self.builder.ren_voc_metadata[v]
-            voc_idx = voc_meta['idx']
-            voc_bus = voc_meta['bus']
-            
-            # Extract VOC state histories
-            start = voc_offset['start']
-            u_mag_hist = x_hist[:, start + 0]      # Output voltage magnitude
-            theta_hist = x_hist[:, start + 1]      # Output voltage angle
-            Pf_hist = x_hist[:, start + 2]         # Filtered active power
-            Qf_hist = x_hist[:, start + 3]         # Filtered reactive power
-            
-            # Compute frequency from angle derivative
-            omega_voc = np.zeros_like(t)
-            omega_voc[0] = 1.0  # Initial frequency
-            for i in range(1, len(t)):
-                dt = t[i] - t[i-1]
-                if dt > 0:
-                    dtheta = theta_hist[i] - theta_hist[i-1]
-                    omega_voc[i] = 1.0 + dtheta / (2 * np.pi * 60 * dt)  # In pu
-            
-            # Convert angle to degrees for plotting
-            theta_deg_hist = np.rad2deg(theta_hist)
-            
-            # Create figure with VOC-specific plots
-            fig, axes = plt.subplots(3, 2, figsize=(12, 10))
-            fig.suptitle(f'VOC Inverter Dynamics - {voc_idx} at Bus {voc_bus}', fontsize=14, fontweight='bold')
-            
-            # Plot 1: Output Voltage Magnitude
-            axes[0, 0].plot(t, u_mag_hist, 'b-', linewidth=1.5)
-            axes[0, 0].axhline(y=voc_meta['u_ref'], color='r', linestyle='--', linewidth=1, label='Reference')
-            axes[0, 0].set_ylabel('Voltage (pu)')
-            axes[0, 0].set_title('Output Voltage Magnitude')
-            axes[0, 0].grid(True, alpha=0.3)
-            axes[0, 0].legend()
-            
-            # Plot 2: Output Voltage Angle
-            axes[0, 1].plot(t, theta_deg_hist, 'g-', linewidth=1.5)
-            axes[0, 1].set_ylabel('Angle (deg)')
-            axes[0, 1].set_title('Output Voltage Angle')
+            axes[0, 1].set_title('Angle Deviation (synch. frame)')
             axes[0, 1].grid(True, alpha=0.3)
             
             # Plot 3: Active Power

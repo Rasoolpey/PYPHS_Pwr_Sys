@@ -127,12 +127,25 @@ class PowerSystemCoordinator:
             self.unique_voc_buses = sorted(set(self.voc_bus_internal))
             self.n_voc_bus = len(self.unique_voc_buses)
             
+            # Precompute VOC filter admittances (constant, from metadata)
+            # VOC is modeled as voltage source behind filter impedance,
+            # analogous to generators behind xd''
+            self.voc_y_filt = []
+            for v_idx, v_meta in enumerate(self.builder.ren_voc_metadata):
+                Rf = v_meta.get('Rf', 0.01)
+                Lf = v_meta.get('Lf', 0.08)
+                omega0 = v_meta.get('omega0', 1.0)
+                Z_filt = Rf + 1j * omega0 * Lf  # pu impedance
+                y_f = 1.0 / Z_filt if abs(Z_filt) > 1e-6 else 0.0
+                self.voc_y_filt.append(y_f)
+            
             print(f"  VOC inverters: {self.n_voc} at buses "
                   f"{[self.voc_to_bus[v] for v in range(self.n_voc)]}")
         else:
             self.voc_bus_internal = []
             self.unique_voc_buses = []
             self.n_voc_bus = 0
+            self.voc_y_filt = []
 
     def _build_grid_mapping(self):
         """Build grid/slack bus mapping from Slack data
@@ -473,8 +486,17 @@ class PowerSystemCoordinator:
             gen_bus = self.gen_bus_internal[i]
             Y_aug[gen_bus, gen_bus] += y_gen_internal[i]
 
-        # Cache LU factorization of Y_aug (only changes on fault transitions)
-        cache_key = (use_fault, fault_bus, fault_impedance)
+        # Add VOC filter admittance to Y_aug (voltage source behind impedance,
+        # exactly like generators behind xd''). This is ESSENTIAL for convergence
+        # because the VOC admittance (~12 pu) is comparable to bus self-admittance.
+        has_voc = voc_voltages is not None and self.n_voc > 0
+        if has_voc:
+            for v in range(self.n_voc):
+                voc_bus = self.voc_bus_internal[v]
+                Y_aug[voc_bus, voc_bus] += self.voc_y_filt[v]
+
+        # Cache LU factorization of Y_aug (changes on fault transitions or VOC presence)
+        cache_key = (use_fault, fault_bus, fault_impedance, has_voc)
         if cache_key != self._lu_cache_key:
             self._lu_cache_key = cache_key
             self._lu_cache = lu_factor(Y_aug)
@@ -485,6 +507,17 @@ class PowerSystemCoordinator:
         for i in range(self.n_gen):
             gen_bus = self.gen_bus_internal[i]
             I_inj[gen_bus] += y_gen_internal[i] * E_sys[i]
+
+        # VOC voltage source current injection (like generators: I = y_filt * u_voc)
+        # This is the source-side current; the filter admittance in Y_aug handles
+        # the V_bus-dependent part automatically via (Y_aug + y_filt) * V = I_total
+        if has_voc:
+            for v in range(self.n_voc):
+                voc_bus = self.voc_bus_internal[v]
+                u_a = voc_voltages[v].get('u_a', 0.0)
+                u_b = voc_voltages[v].get('u_b', 0.0)
+                u_voc = u_a + 1j * u_b
+                I_inj[voc_bus] += self.voc_y_filt[v] * u_voc
 
         # Initialize voltage profile
         V_bus = np.ones(self.n_bus, dtype=complex)
@@ -531,26 +564,12 @@ class PowerSystemCoordinator:
                         V_unit = V_at_bus / abs(V_at_bus)
                         I_ren[ren_bus] += (Ip + 1j * Iq) * V_unit
             
-            # VOC voltage source injection (grid-forming inverters)
-            # VOC outputs voltage u_a + j*u_b through output filter (Rf + j*omega*Lf)
-            # Current injected: I_voc = (u_voc - V_bus) * y_filt
-            I_voc_inj = np.zeros(self.n_bus, dtype=complex)
-            if voc_voltages is not None and self.n_voc > 0:
-                for v in range(self.n_voc):
-                    voc_bus = self.voc_bus_internal[v]
-                    u_a = voc_voltages[v].get('u_a', 0.0)
-                    u_b = voc_voltages[v].get('u_b', 0.0)
-                    y_filt = voc_voltages[v].get('y_filt', 1.0)  # Output admittance
-                    
-                    # VOC output voltage in network frame (αβ = RI frame)
-                    u_voc = u_a + 1j * u_b
-                    V_at_bus = V_bus[voc_bus]
-                    
-                    # Current from VOC: I = (u_voc - V_bus) * Y_filt
-                    I_voc_inj[voc_bus] += (u_voc - V_at_bus) * y_filt
+            # Note: VOC current is already in I_inj (source current y_filt*u_voc)
+            # and the filter admittance is in Y_aug, so no iterative VOC injection needed.
+            # This is the same voltage-source-behind-impedance model used for generators.
 
-            # Total current: generator injection + renewable injection + VOC injection minus load
-            I_total = I_inj + I_ren + I_voc_inj - I_load
+            # Total current: generator injection (incl. VOC source) + renewable - load
+            I_total = I_inj + I_ren - I_load
 
             # If we have grid buses, solve only for non-grid buses
             if len(grid_bus_indices) > 0:
@@ -627,20 +646,19 @@ class PowerSystemCoordinator:
             V_ren[i] = V_bus[ren_bus]
         
         # Get grid currents for VOC inverters
-        # Grid current: I_grid = (u_voc - V_bus) * Y_filt
+        # Grid current flowing FROM VOC TO grid: I = (u_voc - V_bus) * Y_filt
         I_voc = np.zeros(self.n_voc, dtype=complex)
-        if voc_voltages is not None and self.n_voc > 0:
+        if has_voc:
             for v in range(self.n_voc):
                 voc_bus = self.voc_bus_internal[v]
                 u_a = voc_voltages[v].get('u_a', 0.0)
                 u_b = voc_voltages[v].get('u_b', 0.0)
-                y_filt = voc_voltages[v].get('y_filt', 1.0)
                 
                 u_voc = u_a + 1j * u_b
                 V_at_bus = V_bus[voc_bus]
                 
-                # Grid current into VOC (αβ frame)
-                I_voc[v] = (u_voc - V_at_bus) * y_filt
+                # Grid current from VOC (αβ frame), using precomputed admittance
+                I_voc[v] = (u_voc - V_at_bus) * self.voc_y_filt[v]
 
         return Id, Iq, Vd, Vq, V_ren, I_voc
 

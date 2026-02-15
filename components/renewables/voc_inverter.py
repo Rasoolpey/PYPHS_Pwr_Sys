@@ -7,12 +7,14 @@ Based on:
   "Control Design of Passive Grid-Forming Inverters in Port-Hamiltonian Framework"
   IEEE Transactions on Power Electronics, 39(1), 332-345.
 
-State representation (polar form for correct equilibrium):
-  x = [u_mag, theta, Pf, Qf]
-    u_mag  : terminal voltage magnitude |u| (pu)
-    theta  : virtual oscillator phase angle (rad)
-    Pf     : LPF-filtered active power (pu)
-    Qf     : LPF-filtered reactive power (pu)
+State representation (polar form, synchronous reference frame):
+  x = [u_mag, delta_voc, Pf, Qf]
+    u_mag     : terminal voltage magnitude |u| (pu)
+    delta_voc : angle deviation from synchronous frame (rad)
+                Analogous to generator rotor angle delta.
+                At equilibrium d(delta_voc)/dt = 0 (constant).
+    Pf        : LPF-filtered active power (pu)
+    Qf        : LPF-filtered reactive power (pu)
 
 PH Structure (closed-loop, eq.14 in paper):
     H = H_P + H_C
@@ -57,24 +59,30 @@ def voc_inverter_dynamics_jit(x, ig_a, ig_b, Cf, u_ref, omega0, xi1, xi2_abs,
     """
     JIT-compiled VOC inverter dynamics - polar voltage representation.
     
-    States:
-      x[0] = u_mag  : |u(t)| voltage magnitude (pu)
-      x[1] = theta  : virtual oscillator angle (rad)
-      x[2] = Pf     : filtered active power (pu)
-      x[3] = Qf     : filtered reactive power (pu)
+    States (synchronous reference frame):
+      x[0] = u_mag    : |u(t)| voltage magnitude (pu)
+      x[1] = delta_voc : angle deviation from synchronous frame (rad)
+                         At equilibrium, d(delta_voc)/dt = 0 (constant angle)
+      x[2] = Pf       : LPF-filtered active power (pu)
+      x[3] = Qf       : LPF-filtered reactive power (pu)
+    
+    Note: delta_voc is analogous to the generator rotor angle delta.
+          At equilibrium it is constant (no synchronous rotation).
+          Both delta_voc and the grid currents ig_a, ig_b are in the
+          synchronous reference frame, so power computation is consistent.
     
     Returns:
       (x_dot, sgn_xi2_new) where x_dot is numpy array shape (4,)
     """
     u_mag = x[0]
-    theta = x[1]
+    delta_voc = x[1]  # angle deviation from synchronous frame
     Pf = x[2]
     Qf = x[3]
     
-    # ---------- Instantaneous power from αβ currents ----------
-    # GFM outputs: u_a = u_mag*cos(theta), u_b = u_mag*sin(theta)
-    u_a = u_mag * np.cos(theta)
-    u_b = u_mag * np.sin(theta)
+    # ---------- Instantaneous power from αβ currents (synchronous frame) ----------
+    # Both voltage and current are in the synchronous reference frame
+    u_a = u_mag * np.cos(delta_voc)
+    u_b = u_mag * np.sin(delta_voc)
     P_inst = u_a * ig_a + u_b * ig_b
     Q_inst = u_b * ig_a - u_a * ig_b
     
@@ -110,18 +118,20 @@ def voc_inverter_dynamics_jit(x, ig_a, ig_b, Cf, u_ref, omega0, xi1, xi2_abs,
     A = Cf * xi1 * (u2_ref - u2) + Cf * xi2 * Q_ratio
     du_mag = (A / Cf) * u_mag  # magnitude: du/dt = A/Cf * |u|
     
-    # ---------- Phase angle / frequency (eq. 11) - VIRTUAL INERTIA ----------
-    # This P-f droop provides frequency response similar to synchronous inertia
-    # dθ/dt = omega0 + mp*(Pref - Pf)
-    # At equilibrium Pf=Pref so dθ/dt = omega0 (steady rotation)
-    # When power deviates, frequency deviates proportionally (droop characteristic)
+    # ---------- Phase angle / frequency (VIRTUAL INERTIA, synchronous frame) ----------
+    # In the synchronous reference frame, the angle deviation evolves as:
+    #   d(delta_voc)/dt = omega_b * (omega - omega0)
+    # where omega_b = 2*pi*f0 converts pu speed deviation to physical rad/s,
+    # exactly like the generator swing equation: d(delta)/dt = omega_b*(omega-1)
+    # At equilibrium Pf=Pref so omega=omega0 and d(delta_voc)/dt = 0
+    omega_b = 2.0 * np.pi * 60.0  # Base angular frequency in rad/s (60 Hz system)
     if u2 > 1e-6:
         omega = omega0 + mp * (Pref / u2_ref - Pf / u2) * u2_ref
     else:
         omega = omega0
-    dtheta = omega
+    d_delta_voc = omega_b * (omega - omega0)  # rad/s, same units as generator d(delta)/dt
     
-    x_dot = np.array([du_mag, dtheta, dPf, dQf])
+    x_dot = np.array([du_mag, d_delta_voc, dPf, dQf])
     return x_dot, sgn_xi2
 
 
@@ -129,14 +139,14 @@ def voc_inverter_dynamics(x, ports, meta):
     """
     VOC inverter dynamics - wrapper for JIT function.
     
-    States:
-      x[0] = u_mag  : |u(t)| voltage magnitude (pu)
-      x[1] = theta  : virtual oscillator angle (rad)
-      x[2] = Pf     : filtered active power (pu)
-      x[3] = Qf     : filtered reactive power (pu)
+    States (synchronous reference frame, analogous to generator delta):
+      x[0] = u_mag    : |u(t)| voltage magnitude (pu)
+      x[1] = delta_voc : angle deviation from synchronous frame (rad)
+      x[2] = Pf       : filtered active power (pu)
+      x[3] = Qf       : filtered reactive power (pu)
     
     Ports:
-      'ig_a', 'ig_b' : grid current components (pu, αβ frame)
+      'ig_a', 'ig_b' : grid current components (pu, αβ synchronous frame)
     
     Returns:
       numpy array shape (4,)
@@ -162,14 +172,14 @@ def voc_inverter_dynamics(x, ports, meta):
 
 @njit(cache=True)
 def voc_inverter_output_jit(x, ig_a, ig_b, u_ref, omega0, mp, Pref):
-    """JIT-compiled output function."""
+    """JIT-compiled output function (synchronous reference frame)."""
     u_mag = x[0]
-    theta = x[1]
+    delta_voc = x[1]  # angle deviation from synchronous frame
     Pf = x[2]
     Qf = x[3]
     
-    u_a = u_mag * np.cos(theta)
-    u_b = u_mag * np.sin(theta)
+    u_a = u_mag * np.cos(delta_voc)
+    u_b = u_mag * np.sin(delta_voc)
     Pe = u_a * ig_a + u_b * ig_b
     Qe = u_b * ig_a - u_a * ig_b
     
@@ -188,7 +198,7 @@ def voc_inverter_output_jit(x, ig_a, ig_b, u_ref, omega0, mp, Pref):
         Ipout = 0.0
         Iqout = 0.0
     
-    return Pe, Qe, u_a, u_b, u_mag, theta, omega, Ipout, Iqout
+    return Pe, Qe, u_a, u_b, u_mag, delta_voc, omega, Ipout, Iqout
 
 
 def voc_inverter_output(x, ports, meta):
@@ -254,9 +264,9 @@ def voc_init(P0=None, Q0=None, V0=None, theta0=0.0, meta=None, **kwargs):
     """
     Initialize VOC inverter at the power-flow equilibrium.
     
-    At equilibrium:
+    At equilibrium (synchronous reference frame):
       u_mag = V0 (from power flow)
-      theta = theta0 (bus voltage angle from power flow)
+      delta_voc = theta0 (bus voltage angle from power flow, in synchronous frame)
       Pf = P0 (filtered power = reference)
       Qf = Q0
     

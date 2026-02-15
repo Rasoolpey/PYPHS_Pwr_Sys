@@ -1711,44 +1711,43 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
             P_set = voc_meta['Pref']
             Q_set = voc_meta['Qref']
         
-        # Initialize VOC states: [u_mag, theta, Pf, Qf]
-        # At equilibrium, terminal voltage matches bus voltage from power flow
+        # Initialize VOC states: [u_mag, delta_voc, Pf, Qf]
+        # delta_voc is the angle deviation from synchronous frame (like generator delta)
+        # At equilibrium, d(delta_voc)/dt = 0 (constant angle)
         u_mag_init = V_bus
-        theta_init = theta_bus
+        delta_voc_init = theta_bus  # synchronous frame angle from power flow
         Pf_init = P_set
         Qf_init = Q_set
         
-        # CRITICAL: The power flow gives us target P, Q, V, theta, but we need to find
-        # the VOC output voltage that, when coupled through the filter impedance to the
-        # network, actually delivers this power.
-        # 
-        # At equilibrium with network coupling:
-        #   V_bus = u_voc - I_grid * Z_filt
-        #   I_grid = (P - jQ) / u_voc*  (power delivered TO grid)
-        # 
-        # For now, use a simple approach: boost VOC voltage slightly to account for
-        # voltage drop across filter when delivering power
+        # CRITICAL: Compute exact VOC internal voltage to deliver target power
+        # through filter impedance.
+        #   u_voc = V_bus + I_grid * Z_filt
+        #   I_grid = conj(S / V_bus)  (current from VOC to grid)
+        #   S = P + jQ (power delivered to grid)
         
-        # Calculate filter impedance voltage drop
-        # In pu system: Z_filt = Rf + j*omega_b*Lf where omega_b = 1.0 pu
+        # Calculate filter impedance (pu system)
         Rf = voc_meta.get('Rf', 0.01)
         Lf = voc_meta.get('Lf', 0.08)
         omega_b = 1.0  # Base frequency in pu (60 Hz)
         Xf = omega_b * Lf  # Inductive reactance in pu
-        Z_filt_mag = np.sqrt(Rf**2 + Xf**2)
+        Z_filt = Rf + 1j * Xf
+        Z_filt_mag = abs(Z_filt)
         
-        # Estimate grid current magnitude from power
+        # Exact complex voltage calculation
         if V_bus > 0.01:
-            I_est = np.sqrt(P_set**2 + Q_set**2) / V_bus
-            # Voltage drop across filter
-            V_drop = I_est * Z_filt_mag
-            # Boost VOC internal voltage to compensate
-            u_mag_init = V_bus + V_drop
+            V_bus_complex = V_bus * np.exp(1j * theta_bus)
+            S_target = P_set + 1j * Q_set  # Complex power delivered to grid
+            I_grid = np.conj(S_target / V_bus_complex)  # Current from VOC to grid
+            V_drop_complex = I_grid * Z_filt  # Voltage drop across filter
+            u_voc_complex = V_bus_complex + V_drop_complex  # VOC internal voltage
+            
+            u_mag_init = abs(u_voc_complex)
+            delta_voc_init = np.angle(u_voc_complex)
+            V_drop = abs(V_drop_complex)
         else:
             u_mag_init = 1.03
+            V_drop = 0.0
         
-        # Keep angle from power flow
-        theta_init = theta_bus
         Pf_init = P_set
         Qf_init = Q_set
         
@@ -1756,9 +1755,9 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
             print(f"  VOC {v+1} ({voc_meta['idx']}) at Bus {bus_idx}:")
             print(f"    Target: P = {P_set:.4f} pu, Q = {Q_set:.4f} pu at V = {V_bus:.4f} pu")
             print(f"    Filter drop: {V_drop:.4f} pu (Z_filt = {Z_filt_mag:.4f})")
-            print(f"    VOC voltage: u = {u_mag_init:.4f} pu, theta = {np.rad2deg(theta_init):.2f} deg")
+            print(f"    VOC voltage: u = {u_mag_init:.4f} pu, delta = {np.rad2deg(delta_voc_init):.2f} deg")
         
-        voc_states = np.array([u_mag_init, theta_init, Pf_init, Qf_init])
+        voc_states = np.array([u_mag_init, delta_voc_init, Pf_init, Qf_init])
         voc_state_lists.append(voc_states)
         
         # Update VOC metadata references to match initialization
