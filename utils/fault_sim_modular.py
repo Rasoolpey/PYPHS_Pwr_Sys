@@ -540,6 +540,36 @@ class ModularFaultSimulator:
                     'Ip': reg_out['Ipout'],
                     'Iq': reg_out['Iqout'],
                 })
+        
+        # Build VOC voltage source injections for network solver
+        voc_voltages = None
+        if self.n_voc > 0:
+            voc_voltages = []
+            for v in range(self.n_voc):
+                voc_x = voc_states[v]
+                voc_meta = self.builder.ren_voc_metadata[v]
+                
+                # VOC states: [u_mag, theta, Pf, Qf]
+                u_mag = voc_x[0]
+                theta = voc_x[1]
+                
+                # Convert polar to αβ (Cartesian) for network injection
+                u_a = u_mag * np.cos(theta)
+                u_b = u_mag * np.sin(theta)
+                
+                # Output filter admittance: Y_filt = 1 / (Rf + j*omega*Lf)
+                Rf = voc_meta.get('Rf', 0.01)
+                Lf = voc_meta.get('Lf', 0.08)
+                omega0 = voc_meta.get('omega0', 1.0)  # pu frequency
+                omega_rad = omega0 * 2 * np.pi * 60  # rad/s (system base)
+                Z_filt = Rf + 1j * omega_rad * Lf
+                y_filt = 1.0 / Z_filt if abs(Z_filt) > 1e-6 else 1.0
+                
+                voc_voltages.append({
+                    'u_a': u_a,
+                    'u_b': u_b,
+                    'y_filt': y_filt
+                })
 
         # Solve network with grid voltages as boundary conditions
         # Convert gen_states list to numpy array (coordinator expects 2D array)
@@ -549,11 +579,18 @@ class ModularFaultSimulator:
             gen_states_array,
             grid_voltages=grid_voltages,
             ren_injections=ren_injections,
+            voc_voltages=voc_voltages,
             use_fault=use_fault,
             fault_bus=self.fault_bus,
             fault_impedance=self.fault_impedance
         )
-        Id, Iq, Vd, Vq, V_ren = result
+        
+        # Unpack results (handle both old and new return formats)
+        if len(result) == 6:
+            Id, Iq, Vd, Vq, V_ren, I_voc = result
+        else:
+            Id, Iq, Vd, Vq, V_ren = result
+            I_voc = np.array([]) if self.n_voc > 0 else np.array([])
 
         # ========================================================================
         # CENTER OF INERTIA (COI) FREQUENCY CALCULATION (JIT-optimized)
@@ -865,46 +902,24 @@ class ModularFaultSimulator:
             dxdt_ren.append(np.concatenate(unit_dxdt))
         
         # ==============================================================================
-        # VOC INVERTER DYNAMICS
+        # VOC INVERTER DYNAMICS (PROPER VOLTAGE SOURCE COUPLING)
         # ==============================================================================
         dxdt_voc = []
         for v in range(self.n_voc):
             voc_meta = self.builder.ren_voc_metadata[v]
             voc_x = voc_states[v]
-            voc_bus = voc_meta['bus']
             
-            # Get terminal voltage from network solution
-            # VOC bus voltage: get from coordinator's bus voltage solution
-            # The coordinator returns V_ren which contains renewable bus voltages
-            if V_ren is not None and v < len(V_ren):
-                V_conv_mag = abs(V_ren[v])
-                theta_conv = np.angle(V_ren[v])
+            # Extract grid current from network solution (αβ frame, complex)
+            if len(I_voc) > v:
+                I_grid_complex = I_voc[v]
+                ig_a = np.real(I_grid_complex)
+                ig_b = np.imag(I_grid_complex)
             else:
-                # Fallback: use VOC's own voltage estimate
-                V_conv_mag = voc_x[0]  # u_mag
-                theta_conv = voc_x[1]   # theta
-            
-            # Calculate grid current in αβ frame
-            # For VOC in steady state: ig_a, ig_b represent the AC current flowing into the inverter
-            # VOC outputs voltage u_a, u_b; grid delivers current ig_a, ig_b
-            # The network coupling: P + jQ = (u_a - jub) * (ig_a + j*ig_b)*
-            # For now, use simple power-based estimate
-            u_mag_voc = voc_x[0]
-            Pf_voc = voc_x[2]
-            Qf_voc = voc_x[3]
-            
-            # Estimate grid current in αβ frame
-            # Current delivered to VOC terminal: I = (P + jQ) / V*
-            if V_conv_mag > 0.01:
-                # Power injection into inverter
-                I_inv_complex = (Pf_voc + 1j*Qf_voc) / V_conv_mag
-                ig_a = I_inv_complex.real
-                ig_b = I_inv_complex.imag
-            else:
+                # Fallback: no current if network solve didn't return VOC currents
                 ig_a = 0.0
                 ig_b = 0.0
             
-            # Call VOC dynamics
+            # Call VOC dynamics with grid currents
             voc_dxdt = voc_meta['dynamics_fn'](voc_x, {'ig_a': ig_a, 'ig_b': ig_b}, voc_meta)
             dxdt_voc.append(voc_dxdt)
 
@@ -953,9 +968,19 @@ class ModularFaultSimulator:
         # Post-initialization equilibrium correction
         print("\nRefining equilibrium with full dynamics check...")
         
+        # Special handling for VOC: check derivatives excluding frequency (dtheta/dt = omega0)
         for iter_refine in range(10):
             # 1. Calculate derivatives
             dxdt = self.dynamics(0.0, x0)
+            
+            # For VOC, dtheta/dt = omega0 is correct (not an error)
+            # Mask out VOC frequency derivatives from max check
+            dxdt_check = dxdt.copy()
+            if self.n_voc > 0:
+                for v in range(self.n_voc):
+                    voc_offset = self.voc_offsets[v]
+                    theta_idx = voc_offset['start'] + 1  # theta is state 1
+                    dxdt_check[theta_idx] = 0.0  # Mask frequency derivative
             
             # 2. Prepare network data for init_fn calls
             # (Re-solve network to get V, I consistent with current states)
@@ -988,12 +1013,18 @@ class ModularFaultSimulator:
                     reg_out = reg_core.output_fn(reg_x, {'V': V_est}, reg_meta)
                     ren_injections.append({'Ip': reg_out['Ipout'], 'Iq': reg_out['Iqout']})
 
-            Id, Iq, Vd, Vq, V_ren = self.coordinator.solve_network(
+            result = self.coordinator.solve_network(
                 gen_states_array, grid_voltages=grid_voltages, ren_injections=ren_injections
             )
+            # Unpack - handle both old (5) and new (6) return formats
+            if len(result) == 6:
+                Id, Iq, Vd, Vq, V_ren, _ = result
+            else:
+                Id, Iq, Vd, Vq, V_ren = result
             
             max_dpsi = 0.0
             max_dp = 0.0
+            max_dvoc = 0.0
             updates_made = False
             
             # 3. Correct Exciters (dpsi_f/dt -> Efd)
@@ -1133,19 +1164,44 @@ class ModularFaultSimulator:
             
             print(f"  Iter {iter_refine}: Max dpsi_f={max_dpsi:.3e}, Max dp={max_dp:.3e}")
 
+        # Note: VOC filter states (Pf, Qf) will naturally settle during simulation
+        # The LPF has time constant tau = 1/omega_lpf ~ 0.01s, so initial transients
+        # decay quickly. This is physically realistic for converter startup.
+        if self.n_voc > 0:
+            print("\nVOC filter initialization:")
+            print("  Filter states set to power flow targets (Pf=Pref, Qf=Qref)")
+            print("  Note: Small initial transients expected as LPF settles (~10-20ms)")
+            print("        This is physically realistic for converter startup dynamics")
+        
         # Verify initial conditions quality
         print("\n" + "="*70)
         print("  VERIFYING POWER FLOW BASED INITIAL CONDITIONS")
         print("="*70)
         
         dx0_check = self.dynamics(0.0, x0)
-        max_deriv = np.max(np.abs(dx0_check))
-        mean_deriv = np.mean(np.abs(dx0_check))
-        max_idx = np.argmax(np.abs(dx0_check))
+        
+        # Mask VOC frequency derivatives (dtheta/dt = omega0 is correct, not an error)
+        dx0_check_masked = dx0_check.copy()
+        if self.n_voc > 0:
+            for v in range(self.n_voc):
+                voc_offset = self.voc_offsets[v]
+                theta_idx = voc_offset['start'] + 1
+                dx0_check_masked[theta_idx] = 0.0
+        
+        max_deriv = np.max(np.abs(dx0_check_masked))
+        mean_deriv = np.mean(np.abs(dx0_check_masked))
+        max_idx = np.argmax(np.abs(dx0_check_masked))
         
         print(f"\nInitial condition quality:")
         print(f"  Max |dx/dt|:  {max_deriv:.3e} (at state index {max_idx}, value={dx0_check[max_idx]:.3e})")
         print(f"  Mean |dx/dt|: {mean_deriv:.3e}")
+        
+        # Debug: Show VOC derivatives if present
+        if self.n_voc > 0:
+            for v in range(self.n_voc):
+                voc_offset = self.voc_offsets[v]
+                voc_dxdt = dx0_check[voc_offset['start']:voc_offset['start']+4]
+                print(f"  VOC {v+1} derivatives: du/dt={voc_dxdt[0]:.3e}, dtheta/dt={voc_dxdt[1]:.3e}, dPf/dt={voc_dxdt[2]:.3e}, dQf/dt={voc_dxdt[3]:.3e}")
         
         # Identify which component has the largest derivative
         offset = 0
@@ -1379,10 +1435,110 @@ class ModularFaultSimulator:
         print(f"\nPlot saved: {output_path}")
         plt.close(fig)
 
+        # --- VOC Inverter dynamics plots ---
+        if self.n_voc > 0:
+            self._plot_voc_results(sol, filename, output_dir)
+
         # --- Wind Turbine (WT3) dynamics plots ---
         if self.n_ren > 0:
             self._plot_renewable_results(sol, filename, output_dir)
 
+    def _plot_voc_results(self, sol, filename, output_dir):
+        """Plot VOC (Virtual Oscillator Control) inverter dynamics."""
+        import matplotlib.pyplot as plt
+        
+        t = sol.t
+        x_hist = sol.y.T  # (n_time, n_states)
+        
+        for v in range(self.n_voc):
+            voc_offset = self.voc_offsets[v]
+            voc_meta = self.builder.ren_voc_metadata[v]
+            voc_idx = voc_meta['idx']
+            voc_bus = voc_meta['bus']
+            
+            # Extract VOC state histories
+            start = voc_offset['start']
+            u_mag_hist = x_hist[:, start + 0]      # Output voltage magnitude
+            theta_hist = x_hist[:, start + 1]      # Output voltage angle
+            Pf_hist = x_hist[:, start + 2]         # Filtered active power
+            Qf_hist = x_hist[:, start + 3]         # Filtered reactive power
+            
+            # Compute frequency from angle derivative
+            omega_voc = np.zeros_like(t)
+            omega_voc[0] = 1.0  # Initial frequency
+            for i in range(1, len(t)):
+                dt = t[i] - t[i-1]
+                if dt > 0:
+                    dtheta = theta_hist[i] - theta_hist[i-1]
+                    omega_voc[i] = 1.0 + dtheta / (2 * np.pi * 60 * dt)  # In pu
+            
+            # Convert angle to degrees for plotting
+            theta_deg_hist = np.rad2deg(theta_hist)
+            
+            # Create figure with VOC-specific plots
+            fig, axes = plt.subplots(3, 2, figsize=(12, 10))
+            fig.suptitle(f'VOC Inverter Dynamics - {voc_idx} at Bus {voc_bus}', fontsize=14, fontweight='bold')
+            
+            # Plot 1: Output Voltage Magnitude
+            axes[0, 0].plot(t, u_mag_hist, 'b-', linewidth=1.5)
+            axes[0, 0].axhline(y=voc_meta['u_ref'], color='r', linestyle='--', linewidth=1, label='Reference')
+            axes[0, 0].set_ylabel('Voltage (pu)')
+            axes[0, 0].set_title('Output Voltage Magnitude')
+            axes[0, 0].grid(True, alpha=0.3)
+            axes[0, 0].legend()
+            
+            # Plot 2: Output Voltage Angle
+            axes[0, 1].plot(t, theta_deg_hist, 'g-', linewidth=1.5)
+            axes[0, 1].set_ylabel('Angle (deg)')
+            axes[0, 1].set_title('Output Voltage Angle')
+            axes[0, 1].grid(True, alpha=0.3)
+            
+            # Plot 3: Active Power
+            axes[1, 0].plot(t, Pf_hist, 'r-', linewidth=1.5)
+            axes[1, 0].axhline(y=voc_meta['Pref'], color='k', linestyle='--', linewidth=1, label='Reference')
+            axes[1, 0].set_ylabel('Power (pu)')
+            axes[1, 0].set_title('Active Power Output')
+            axes[1, 0].grid(True, alpha=0.3)
+            axes[1, 0].legend()
+            
+            # Plot 4: Reactive Power
+            axes[1, 1].plot(t, Qf_hist, 'm-', linewidth=1.5)
+            axes[1, 1].axhline(y=voc_meta['Qref'], color='k', linestyle='--', linewidth=1, label='Reference')
+            axes[1, 1].set_ylabel('Power (pu)')
+            axes[1, 1].set_title('Reactive Power Output')
+            axes[1, 1].grid(True, alpha=0.3)
+            axes[1, 1].legend()
+            
+            # Plot 5: Frequency
+            axes[2, 0].plot(t, omega_voc, 'c-', linewidth=1.5)
+            axes[2, 0].axhline(y=1.0, color='k', linestyle='--', linewidth=1, label='Nominal')
+            axes[2, 0].set_xlabel('Time (s)')
+            axes[2, 0].set_ylabel('Frequency (pu)')
+            axes[2, 0].set_title('VOC Frequency (from P-f droop)')
+            axes[2, 0].grid(True, alpha=0.3)
+            axes[2, 0].legend()
+            
+            # Plot 6: Apparent Power
+            S_hist = np.sqrt(Pf_hist**2 + Qf_hist**2)
+            axes[2, 1].plot(t, S_hist, 'orange', linewidth=1.5, label='|S|')
+            axes[2, 1].plot(t, Pf_hist, 'r-', linewidth=1, alpha=0.7, label='P')
+            axes[2, 1].plot(t, Qf_hist, 'm-', linewidth=1, alpha=0.7, label='Q')
+            axes[2, 1].set_xlabel('Time (s)')
+            axes[2, 1].set_ylabel('Power (pu)')
+            axes[2, 1].set_title('Apparent Power |S|')
+            axes[2, 1].grid(True, alpha=0.3)
+            axes[2, 1].legend()
+            
+            plt.tight_layout()
+            
+            # Save figure
+            voc_filename = filename.replace('.png', f'_voc{v+1}.png')
+            output_path = f"{output_dir}/{voc_filename}"
+            plt.savefig(output_path, dpi=150, bbox_inches='tight')
+            plt.close()
+            
+            print(f"  VOC plot saved: {output_path}")
+    
     def _plot_renewable_results(self, sol, filename, output_dir):
         """Plot wind turbine (WT3) sub-component dynamics."""
         t = sol.t

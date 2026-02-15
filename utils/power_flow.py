@@ -1113,9 +1113,14 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
                 ren_injections_net.append({'Ip': reg_out_temp['Ipout'], 'Iq': reg_out_temp['Iqout']})
 
             # Solve network with current renewable injections
-            _, _, _, _, V_ren_actual = coordinator.solve_network(
+            result = coordinator.solve_network(
                 gen_states_net, grid_voltages=grid_voltages_net, ren_injections=ren_injections_net
             )
+            # Unpack - handle both old (5) and new (6) return formats
+            if len(result) == 6:
+                _, _, _, _, V_ren_actual, _ = result
+            else:
+                _, _, _, _, V_ren_actual = result
 
             # Refine each renewable unit's states
             for i in range(n_ren):
@@ -1420,9 +1425,14 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
                 ren_injections_final.append({'Ip': reg_out['Ipout'], 'Iq': reg_out['Iqout']})
 
         # Solve network WITH renewables to get accurate sync generator terminal quantities
-        Id_net, Iq_net, Vd_net, Vq_net, V_ren_net = coordinator.solve_network(
+        result = coordinator.solve_network(
             gen_states, grid_voltages=grid_voltages, ren_injections=ren_injections_final
         )
+        # Unpack - handle both old (5) and new (6) return formats
+        if len(result) == 6:
+            Id_net, Iq_net, Vd_net, Vq_net, V_ren_net, _ = result
+        else:
+            Id_net, Iq_net, Vd_net, Vq_net, V_ren_net = result
         P_elec = Vd_net * Id_net + Vq_net * Iq_net
 
         # Adjust stator fluxes to match actual network voltages/currents
@@ -1459,9 +1469,14 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
             gen_states_adj.append(gen_x)
         gen_states_adj = np.array(gen_states_adj)
 
-        Id_net, Iq_net, Vd_net, Vq_net, V_ren_net = coordinator.solve_network(
+        result = coordinator.solve_network(
             gen_states_adj, grid_voltages=grid_voltages, ren_injections=ren_injections_final
         )
+        # Unpack - handle both old (5) and new (6) return formats
+        if len(result) == 6:
+            Id_net, Iq_net, Vd_net, Vq_net, V_ren_net, _ = result
+        else:
+            Id_net, Iq_net, Vd_net, Vq_net, V_ren_net = result
         P_elec = Vd_net * Id_net + Vq_net * Iq_net
 
         # Refine exciter states using actual network quantities (FULLY GENERIC)
@@ -1703,6 +1718,46 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
         Pf_init = P_set
         Qf_init = Q_set
         
+        # CRITICAL: The power flow gives us target P, Q, V, theta, but we need to find
+        # the VOC output voltage that, when coupled through the filter impedance to the
+        # network, actually delivers this power.
+        # 
+        # At equilibrium with network coupling:
+        #   V_bus = u_voc - I_grid * Z_filt
+        #   I_grid = (P - jQ) / u_voc*  (power delivered TO grid)
+        # 
+        # For now, use a simple approach: boost VOC voltage slightly to account for
+        # voltage drop across filter when delivering power
+        
+        # Calculate filter impedance voltage drop
+        # In pu system: Z_filt = Rf + j*omega_b*Lf where omega_b = 1.0 pu
+        Rf = voc_meta.get('Rf', 0.01)
+        Lf = voc_meta.get('Lf', 0.08)
+        omega_b = 1.0  # Base frequency in pu (60 Hz)
+        Xf = omega_b * Lf  # Inductive reactance in pu
+        Z_filt_mag = np.sqrt(Rf**2 + Xf**2)
+        
+        # Estimate grid current magnitude from power
+        if V_bus > 0.01:
+            I_est = np.sqrt(P_set**2 + Q_set**2) / V_bus
+            # Voltage drop across filter
+            V_drop = I_est * Z_filt_mag
+            # Boost VOC internal voltage to compensate
+            u_mag_init = V_bus + V_drop
+        else:
+            u_mag_init = 1.03
+        
+        # Keep angle from power flow
+        theta_init = theta_bus
+        Pf_init = P_set
+        Qf_init = Q_set
+        
+        if verbose:
+            print(f"  VOC {v+1} ({voc_meta['idx']}) at Bus {bus_idx}:")
+            print(f"    Target: P = {P_set:.4f} pu, Q = {Q_set:.4f} pu at V = {V_bus:.4f} pu")
+            print(f"    Filter drop: {V_drop:.4f} pu (Z_filt = {Z_filt_mag:.4f})")
+            print(f"    VOC voltage: u = {u_mag_init:.4f} pu, theta = {np.rad2deg(theta_init):.2f} deg")
+        
         voc_states = np.array([u_mag_init, theta_init, Pf_init, Qf_init])
         voc_state_lists.append(voc_states)
         
@@ -1710,11 +1765,6 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
         voc_meta['Pref'] = P_set
         voc_meta['Qref'] = Q_set
         voc_meta['u_ref'] = V_bus  # Track actual operating voltage
-        
-        if verbose:
-            print(f"  VOC {v+1} ({voc_meta['idx']}) at Bus {bus_idx}:")
-            print(f"    V = {u_mag_init:.4f} pu, theta = {np.rad2deg(theta_init):.2f} deg")
-            print(f"    P = {Pf_init:.4f} pu, Q = {Qf_init:.4f} pu")
     
     # ========================================================================
     # PART 5: ASSEMBLE FINAL STATE VECTOR (fully generic)
