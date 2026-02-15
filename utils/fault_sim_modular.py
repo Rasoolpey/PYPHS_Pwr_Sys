@@ -1105,7 +1105,7 @@ class ModularFaultSimulator:
         fault_msg = f"fault @ Bus {self.fault_bus}, t={self.fault_start}-{self.fault_start + self.fault_duration}s" if self.fault_enabled else "no fault"
         print(f"\nSimulating {t_end}s, {fault_msg}")
         if self.fault_enabled:
-            print(f"  Solver: Radau with max_step=1ms (prevents excessive refinement during fault)")
+            print(f"  Solver: Radau with max_step=10ms (balances speed vs accuracy for stiff fault dynamics)")
 
         # Prepare JIT-compiled dynamics (pack metadata into arrays, warmup)
         if use_jit and self.n_gen > 0:
@@ -1170,8 +1170,9 @@ class ModularFaultSimulator:
         if self.fault_enabled:
             solver_method = 'Radau'
             # Limit max step to prevent excessive refinement during fault
-            # Typical fault duration is 0.1s, so max_step=0.001 gives 100 steps across fault
-            max_step = 0.001  # 1 millisecond maximum step size
+            # Typical fault duration is 0.1s, so max_step=0.01 gives 10 steps across fault
+            # Larger than 0.001 to give solver more flexibility with stiff dynamics
+            max_step = 0.01  # 10 milliseconds maximum step size
         else:
             solver_method = 'RK45'
             max_step = np.inf  # No limit for normal operation

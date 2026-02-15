@@ -10,7 +10,7 @@
     "enabled": true,
     "bus": 9,
     "t_start": 1.0,
-    "t_end": 1.1,
+    "t_end": 1.05,
     "impedance": [0.0, 0.01]
   },
   "power_flow": {
