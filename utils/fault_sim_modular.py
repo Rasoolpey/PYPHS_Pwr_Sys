@@ -880,11 +880,11 @@ class ModularFaultSimulator:
                             
                             def relax_limit(key, target_val):
                                 if key in exc_meta:
-                                    # Relax if limit is less than target * 1.2 (headroom)
-                                    # Or if we are in a clamped state, just boost it significantly
+                                    # Relax conservatively: only 20% above target
+                                    # Avoids destroying transient stability limits
                                     if exc_meta[key] < target_val * 1.2:
                                         old_lim = exc_meta[key]
-                                        new_lim = max(target_val * 1.5, old_lim * 1.5, 10.0)
+                                        new_lim = target_val * 1.2
                                         exc_meta[key] = new_lim
                                         print(f"    Gen {i}: Relaxing {key} {old_lim:.3f} -> {new_lim:.3f}")
                                         return True
@@ -894,11 +894,13 @@ class ModularFaultSimulator:
                             relaxed |= relax_limit('VRMAX', Efd_target)
                             relaxed |= relax_limit('VMMAX', Efd_target)
                             relaxed |= relax_limit('Efd_max', Efd_target)
-                            
+
                             if exc_core.model_name == 'ESST3A':
                                 relaxed |= relax_limit('VGMAX', Efd_target)
                                 relaxed |= relax_limit('VBMAX', Efd_target)
-                                relaxed |= relax_limit('VIMAX', Efd_target)
+                                # Do NOT relax VIMAX - it limits exciter input during
+                                # transients and is critical for transient stability.
+                                # If VIMAX is too low, increase it in the JSON config.
                             
                             if relaxed:
                                 updates_made = True
