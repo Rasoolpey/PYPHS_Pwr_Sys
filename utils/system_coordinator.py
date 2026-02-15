@@ -24,6 +24,7 @@ class PowerSystemCoordinator:
         self._build_bus_mapping()
         self._build_generator_mapping()
         self._build_renewable_mapping()
+        self._build_voc_mapping()
         self._build_grid_mapping()
         self._build_load_mapping()
 
@@ -101,6 +102,37 @@ class PowerSystemCoordinator:
         if self.n_ren > 0:
             print(f"  Renewable converters: {self.n_ren} at buses "
                   f"{[self.ren_to_bus[i] for i in range(self.n_ren)]}")
+    
+    def _build_voc_mapping(self):
+        """Build VOC (grid-forming inverter) to bus mapping"""
+        self.n_voc = len(self.builder.ren_voc) if hasattr(self.builder, 'ren_voc') else 0
+        
+        self.voc_to_bus = {}
+        self.bus_to_vocs = {}
+        
+        if self.n_voc > 0:
+            for v, meta in enumerate(self.builder.ren_voc_metadata):
+                bus_idx = meta['bus']
+                self.voc_to_bus[v] = bus_idx
+                
+                if bus_idx not in self.bus_to_vocs:
+                    self.bus_to_vocs[bus_idx] = []
+                self.bus_to_vocs[bus_idx].append(v)
+            
+            # Get VOC bus internal indices
+            self.voc_bus_internal = [self.bus_idx_to_internal[self.voc_to_bus[v]]
+                                      for v in range(self.n_voc)]
+            
+            # Unique VOC bus indices
+            self.unique_voc_buses = sorted(set(self.voc_bus_internal))
+            self.n_voc_bus = len(self.unique_voc_buses)
+            
+            print(f"  VOC inverters: {self.n_voc} at buses "
+                  f"{[self.voc_to_bus[v] for v in range(self.n_voc)]}")
+        else:
+            self.voc_bus_internal = []
+            self.unique_voc_buses = []
+            self.n_voc_bus = 0
 
     def _build_grid_mapping(self):
         """Build grid/slack bus mapping from Slack data
@@ -342,7 +374,7 @@ class PowerSystemCoordinator:
             return Ygg - Ygl @ Yll_inv @ Ylg
 
     def solve_network(self, gen_states, grid_voltages=None, ren_injections=None,
-                       Ybus=None, use_fault=False, fault_bus=None, fault_impedance=None):
+                       voc_voltages=None, Ybus=None, use_fault=False, fault_bus=None, fault_impedance=None):
         """
         Solve network with Park transformations using FULL network.
 
@@ -351,8 +383,10 @@ class PowerSystemCoordinator:
         2. Fix grid bus voltages (known boundary conditions)
         3. Inject current at generator buses into full network
         4. Inject converter (REGCA1) current at renewable buses
-        5. Solve for non-grid bus voltages
-        6. Extract generator terminal voltages and currents
+        5. Inject VOC voltage sources at VOC buses
+        6. Solve for non-grid bus voltages
+        7. Extract generator terminal voltages and currents
+        8. Extract VOC grid currents
 
         Args:
             gen_states: Generator states (n_gen x n_states_per_gen)
@@ -361,6 +395,10 @@ class PowerSystemCoordinator:
                            Ip is active current (in-phase with V), Iq is reactive current
                            (leading V by 90 deg, generator convention: Iq>0 = capacitive).
                            If None, no renewable injection.
+            voc_voltages: List of dicts with 'u_a', 'u_b', 'y_filt' for each VOC inverter.
+                         u_a, u_b are output voltages in αβ frame (pu).
+                         y_filt is output admittance 1/(Rf + j*omega*Lf).
+                         If None, no VOC injection.
             Ybus: If provided, use this Ybus (for backward compatibility)
             use_fault: If True, apply fault
             fault_bus: Bus index for fault
@@ -369,6 +407,7 @@ class PowerSystemCoordinator:
         Returns:
             Id, Iq, Vd, Vq: Currents and voltages in machine frame for each generator
             If renewables exist, also returns V_ren (complex terminal voltages at converter buses)
+            If VOC inverters exist, also returns I_voc (complex grid currents in αβ frame)
         """
         # Get full Ybus (with or without fault)
         if use_fault and fault_bus is not None:
@@ -491,9 +530,27 @@ class PowerSystemCoordinator:
                     if abs(V_at_bus) > 0.1:
                         V_unit = V_at_bus / abs(V_at_bus)
                         I_ren[ren_bus] += (Ip + 1j * Iq) * V_unit
+            
+            # VOC voltage source injection (grid-forming inverters)
+            # VOC outputs voltage u_a + j*u_b through output filter (Rf + j*omega*Lf)
+            # Current injected: I_voc = (u_voc - V_bus) * y_filt
+            I_voc_inj = np.zeros(self.n_bus, dtype=complex)
+            if voc_voltages is not None and self.n_voc > 0:
+                for v in range(self.n_voc):
+                    voc_bus = self.voc_bus_internal[v]
+                    u_a = voc_voltages[v].get('u_a', 0.0)
+                    u_b = voc_voltages[v].get('u_b', 0.0)
+                    y_filt = voc_voltages[v].get('y_filt', 1.0)  # Output admittance
+                    
+                    # VOC output voltage in network frame (αβ = RI frame)
+                    u_voc = u_a + 1j * u_b
+                    V_at_bus = V_bus[voc_bus]
+                    
+                    # Current from VOC: I = (u_voc - V_bus) * Y_filt
+                    I_voc_inj[voc_bus] += (u_voc - V_at_bus) * y_filt
 
-            # Total current: generator injection + renewable injection minus load
-            I_total = I_inj + I_ren - I_load
+            # Total current: generator injection + renewable injection + VOC injection minus load
+            I_total = I_inj + I_ren + I_voc_inj - I_load
 
             # If we have grid buses, solve only for non-grid buses
             if len(grid_bus_indices) > 0:
@@ -568,8 +625,24 @@ class PowerSystemCoordinator:
         for i in range(self.n_ren):
             ren_bus = self.ren_bus_internal[i]
             V_ren[i] = V_bus[ren_bus]
+        
+        # Get grid currents for VOC inverters
+        # Grid current: I_grid = (u_voc - V_bus) * Y_filt
+        I_voc = np.zeros(self.n_voc, dtype=complex)
+        if voc_voltages is not None and self.n_voc > 0:
+            for v in range(self.n_voc):
+                voc_bus = self.voc_bus_internal[v]
+                u_a = voc_voltages[v].get('u_a', 0.0)
+                u_b = voc_voltages[v].get('u_b', 0.0)
+                y_filt = voc_voltages[v].get('y_filt', 1.0)
+                
+                u_voc = u_a + 1j * u_b
+                V_at_bus = V_bus[voc_bus]
+                
+                # Grid current into VOC (αβ frame)
+                I_voc[v] = (u_voc - V_at_bus) * y_filt
 
-        return Id, Iq, Vd, Vq, V_ren
+        return Id, Iq, Vd, Vq, V_ren, I_voc
 
     def get_bus_voltages(self, gen_states):
         """Get voltages at generator buses"""

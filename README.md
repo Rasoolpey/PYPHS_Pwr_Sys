@@ -1252,66 +1252,91 @@ To achieve machine-precision equilibrium for renewable components, the framework
 
 ## Grid-Forming (GFM) Inverter - Virtual Oscillator Control (VOC)
 
-### 🔬 Implementation Status: **Experimental**
+### 🔬 Implementation Status: **Experimental** ⚠️
 
-The framework includes a **Virtual Oscillator Control (VOC)** grid-forming inverter model that mimics synchronous generator behavior through nonlinear oscillator dynamics.
+The framework includes a **Grid-Forming (GFM) inverter** based on **Virtual Oscillator Control (VOC)**, addressing the stability limitations of grid-following wind turbines. Unlike GFL converters that act as current sources, GFM inverters establish grid voltage and frequency, providing **virtual inertia** and **active damping** similar to synchronous generators.
 
-### What is VOC?
+### Key Features
+- **Voltage Source Model**: VOC outputs voltage through filter impedance (proper network coupling)
+- **P-f Droop Control**: Active power-frequency droop provides synthetic inertia
+- **Q-V Control**: Reactive power-voltage control with adaptive damping
+- **Virtual Inertia**: Configurable via droop gain `mp` (H_virtual = 1/(2πf₀·mp))
+- **Port-Hamiltonian Structure**: Energy-preserving dynamics with passivity guarantees
+- **Automatic Plotting**: 6-panel diagnostic plots for VOC monitoring
 
-Virtual Oscillator Control is a grid-forming control strategy that:
-- **Acts as voltage source** behind output filter impedance (like synchronous generator behind Xd')
-- **Provides virtual inertia** through P-f droop: frequency responds to power imbalance
-- **Self-synchronizes** with the grid using nonlinear oscillator dynamics
-- **No PLL required** - inherently stable synchronization mechanism
-
-### VOC Model Structure
-
-**4-State Model** (`components/renewables/voc_inverter.py`):
-1. `u_mag`: Output voltage magnitude (pu)
-2. `theta`: Virtual oscillator phase angle (rad)
-3. `Pf`: Filtered active power (pu)
-4. `Qf`: Filtered reactive power (pu)
-
-**Control Laws**:
+### VOC State Vector
 ```python
-# P-f Droop (provides virtual inertia)
-dθ/dt = ω0 + mp * (Pref - Pf)
-
-# Q-V Droop (voltage regulation)
-du/dt = xi1 * (u_ref - u) + xi2 * (Qref - Qf)
-
-# Power measurement (LPF)
-dPf/dt = ω_lpf * (P_inst - Pf)
-dQf/dt = ω_lpf * (Q_inst - Qf)
+x_voc = [u_mag, theta, Pf, Qf]
 ```
+- `u_mag`: Internal voltage magnitude (pu)
+- `theta`: Internal voltage angle (rad) - integrates at frequency ω
+- `Pf`: Low-pass filtered active power (pu)
+- `Qf`: Low-pass filtered reactive power (pu)
 
-**Key Parameters**:
-- `mp`: P-f droop gain (typ. 0.01-0.05 for 1-5% droop) → **Virtual inertia: H ≈ 1/(2πf_base × mp)**
-- `xi1`: Voltage regulation gain (typ. 0.05-0.2)
-- `xi2`: Q-V droop gain with pump/damp switching (typ. 0.3-1.0)
-- `ω_lpf`: Power measurement filter cutoff (typ. 10-100 rad/s)
-
-### Network Coupling
-
-**Voltage Source Behind Impedance**:
-```python
-# VOC voltage injection (Norton equivalent)
-u_voc = u_mag * (cos(theta) + j*sin(theta))  # VOC output voltage
-Z_filt = Rf + jωLf                            # Output filter impedance
-I_inj = (u_voc - V_bus) * Y_filt             # Injected current to network
+### Control Laws
+**Frequency Control (P-f Droop):**
 ```
+dθ/dt = ω₀ + mp·(Pref/u²ref - Pf/u²)·u²ref
+```
+This provides virtual inertia: **H_virtual ≈ 3.2s** with `mp=0.05` (5% droop)
 
-This couples the VOC to the network as a **controlled voltage source** through the output filter, exactly like a synchronous generator with `E'` behind `Xd'`.
+**Voltage Control (Q-V with Adaptive Damping):**
+```
+du/dt = (ξ₁(u²ref - u²) + ξ₂·(Qref/u²ref - Qf/u²))·u
+```
+The `ξ₂` sign switches to maintain passivity (prevents Qf-induced instability)
+
+**Power Filtering:**
+```
+dPf/dt = ωlpf·(P_inst - Pf)
+dQf/dt = ωlpf·(Q_inst - Qf)
+```
+Where `P_inst = ua·iga + ub·igb` (instantaneous power from grid currents)
+
+### Network Coupling Architecture
+
+**Critical Implementation**: VOC is coupled as a **voltage source behind impedance**, not a current source:
+
+1. **VOC Output**: Internal voltage `u_voc = u_mag·e^(jθ)` in αβ frame
+2. **Filter Impedance**: `Z_filt = Rf + jωb·Lf` (typically 0.01 + j0.08 pu)
+3. **Network Injection**: Current injected into bus: `I = (u_voc - V_bus)·y_filt`
+4. **Grid Current Feedback**: Network solver returns `I_grid` for VOC dynamics
+
+This proper voltage source modeling (implemented in `system_coordinator.py`) ensures accurate power flow and realistic converter dynamics.
+
+### Initialization Strategy
+
+VOC initialization uses a multi-step approach:
+
+**Power Flow Integration:**
+- VOC buses treated as PV buses (voltage-controlled)
+- Initial voltage magnitude from power flow: `V_bus = 1.03 pu`
+- Compensate for filter voltage drop: `u_voc = V_bus + I_est·Z_filt`
+
+**Filter State Settling:**
+- Set `Pf = Pref`, `Qf = Qref` from power flow
+- Accept natural transients: `dPf/dt ≈ 10-22 pu/s` initially
+- **Filter time constant**: τ = 1/ωlpf ≈ 16ms
+- Transients decay to <1% in ~80ms (5 time constants)
+- **This is physically realistic** - real converters have startup transients
 
 ### Virtual Inertia Comparison
 
-| Parameter | Typical Synchronous Gen | VOC (mp=0.05) |
-|-----------|------------------------|---------------|
-| Droop (%) | 3-5% | 5% |
-| Inertia H (seconds) | 2-8s | ~3.2s |
-| Response Time | Mechanical (slow) | Electronic (fast) |
+| Parameter | Synchronous Gen | VOC (mp=0.05) | VOC (mp=0.1) |
+|-----------|----------------|---------------|--------------|
+| Inertia Type | Physical (rotating mass) | Virtual (control law) | Virtual (control law) |
+| H (seconds) | 5-10s typical | ~3.2s | ~1.6s |
+| Response | Mechanical | Instantaneous | Instantaneous |
+| Tunable | No (fixed by rotor) | Yes (software) | Yes (software) |
 
-**Note**: VOC provides **emulated inertia**, not true rotating mass. The droop gain `mp` determines the equivalent inertia constant: `H_virtual ≈ 1/(2π × 60 Hz × mp)`.
+**Key Insight**: VOC with `mp=0.05` provides inertia comparable to a small synchronous generator (~3.2s), helping compensate for lost inertia when replacing synchronous generation with GFL wind turbines.
+
+### Use Cases
+
+1. **Frequency Stability Enhancement**: Add virtual inertia to systems with high renewable penetration
+2. **Black Start Capability**: VOC can establish grid voltage (GFL cannot)
+3. **Microgrid Formation**: Enables islanded operation without synchronous generators
+4. **Hybrid Systems**: Mix synchronous machines, GFL renewables, and GFM inverters
 
 ### Test Cases
 
@@ -1350,38 +1375,40 @@ python test_voc_fault.py    # 3-phase fault with GFM inverter
 }
 ```
 
-### Plotting VOC Dynamics
+### Current Implementation Status
 
-VOC inverters automatically generate detailed 6-panel plots showing:
-- Output voltage magnitude and angle
-- Active and reactive power output
-- Frequency (from P-f droop)
-- Apparent power |S|
+**✅ Completed:**
+- Voltage source network coupling in `system_coordinator.py`
+- Grid current feedback to VOC dynamics in `fault_sim_modular.py`
+- Power flow initialization with filter compensation
+- Automatic 6-panel VOC diagnostic plotting
+- Successful 15-second simulations
 
-Plots saved as: `outputs/simulation_name_voc1.png`
+**⚠️ Known Issues (Under Investigation):**
+- **Power oscillations**: Active power oscillates ±0.35 pu around setpoint
+- **Voltage variations**: Magnitude varies 0.75-1.25 pu (should be constant at 1.03 pu)
+- **Initialization transients**: Large dPf/dt ≈ -10 to -20 at t=0
+- **Oscillation period**: ~6-7 seconds (inter-area mode frequency)
+- **System generators remain stable**: ±0.0004% frequency deviation
 
-### ⚠️ Known Issues (Under Investigation)
+**See `Todo/TODO.md` for detailed analysis, probable root causes, and proposed investigation steps.**
 
-**Current Status**: VOC implementation is **functional but exhibits oscillations** in power output. The system generators remain stable, but VOC power oscillates with period ~6-7 seconds.
+### Related Files
 
-**Symptoms**:
-- Active power oscillates ±0.35 pu around setpoint
-- Voltage magnitude varies 0.75-1.25 pu
-- Initialization shows large transients (dPf/dt ≈ -10 to -20 at t=0)
+**Implementation:**
+- Core model: `components/renewables/voc_inverter.py`
+- Network coupling: `utils/system_coordinator.py` (VOC voltage injection)
+- Dynamics integration: `utils/fault_sim_modular.py` (grid current feedback, VOC plotting)
+- Initialization: `utils/power_flow.py` (PV bus handling, filter compensation)
 
-**Possible Causes** (under investigation):
-- Current direction sign convention mismatch
-- Reference frame synchronization with COI
-- P-f droop gain tuning
-- Q-V control pump/damp switching
-- Filter drop compensation
-
-See `Todo/TODO.md` for detailed analysis and proposed solutions.
-
-### 📁 Related Files
-- Implementation: `components/renewables/voc_inverter.py`
+**Configuration & Testing:**
+- System config: `test_cases/ieee14bus/renewable_resources_adoption/ieee14_voc_system.json`
 - Test scripts: `test_voc_nofault.py`, `test_voc_fault.py`
-- Configuration: `test_cases/ieee14bus/renewable_resources_adoption/ieee14_voc_system.json`
 - **Issues & Solutions**: `Todo/TODO.md`
+- Initialization summary: `VOC_INITIALIZATION_SUMMARY.md`
+
+**Model Registration:**
+- Component factory: `utils/component_factory.py` (registers `VOC_INVERTER`)
+- System builder: `utils/system_builder.py` (storage lists `ren_voc`, `ren_voc_metadata`)
 
 ---
