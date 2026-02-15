@@ -12,7 +12,7 @@ from utils.fault_sim_modular import ModularFaultSimulator
 def main():
     print("\n" + "="*80)
     print("  IEEE 14-BUS + VOC INVERTER - NO FAULT EQUILIBRIUM TEST")
-    print("  Virtual Oscillator Control with P-f Droop (mp=0.05 → H_virtual≈3.2s)")
+    print("  Virtual Oscillator Control with P-f Droop (mp=0.05, H_virtual~3.2s)")
     print("="*80)
 
     system_json = "test_cases/ieee14bus/renewable_resources_adoption/ieee14_voc_system.json"
@@ -64,7 +64,7 @@ def main():
     print(f"  Time points: {len(sol.t)}")
     print(f"  Final time: {sol.t[-1]:.2f}s")
     print(f"  Expected: All variables should remain constant (flat lines)")
-    print(f"  VOC provides virtual inertia → system inertia effectively increased")
+    print(f"  VOC provides virtual inertia - system inertia effectively increased")
     print("="*80)
 
 if __name__ == "__main__":

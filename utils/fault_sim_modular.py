@@ -514,6 +514,13 @@ class ModularFaultSimulator:
                 ren_states[r]['wttqa1'] = x_flat[u['wttqa1_start']:u['wttqa1_start'] + u['wttqa1_n']]
             if u['wtpta1_n'] > 0:
                 ren_states[r]['wtpta1'] = x_flat[u['wtpta1_start']:u['wtpta1_start'] + u['wtpta1_n']]
+        
+        # Extract VOC inverter states
+        voc_states = []
+        for v in range(self.n_voc):
+            voc_offset = self.voc_offsets[v]
+            voc_x = x_flat[voc_offset['start']:voc_offset['start']+voc_offset['n_states']]
+            voc_states.append(voc_x)
 
         # Build renewable current injections for network solver
         ren_injections = None
@@ -856,9 +863,53 @@ class ModularFaultSimulator:
                 unit_dxdt.append(pt_dxdt)
 
             dxdt_ren.append(np.concatenate(unit_dxdt))
+        
+        # ==============================================================================
+        # VOC INVERTER DYNAMICS
+        # ==============================================================================
+        dxdt_voc = []
+        for v in range(self.n_voc):
+            voc_meta = self.builder.ren_voc_metadata[v]
+            voc_x = voc_states[v]
+            voc_bus = voc_meta['bus']
+            
+            # Get terminal voltage from network solution
+            # VOC bus voltage: get from coordinator's bus voltage solution
+            # The coordinator returns V_ren which contains renewable bus voltages
+            if V_ren is not None and v < len(V_ren):
+                V_conv_mag = abs(V_ren[v])
+                theta_conv = np.angle(V_ren[v])
+            else:
+                # Fallback: use VOC's own voltage estimate
+                V_conv_mag = voc_x[0]  # u_mag
+                theta_conv = voc_x[1]   # theta
+            
+            # Calculate grid current in αβ frame
+            # For VOC in steady state: ig_a, ig_b represent the AC current flowing into the inverter
+            # VOC outputs voltage u_a, u_b; grid delivers current ig_a, ig_b
+            # The network coupling: P + jQ = (u_a - jub) * (ig_a + j*ig_b)*
+            # For now, use simple power-based estimate
+            u_mag_voc = voc_x[0]
+            Pf_voc = voc_x[2]
+            Qf_voc = voc_x[3]
+            
+            # Estimate grid current in αβ frame
+            # Current delivered to VOC terminal: I = (P + jQ) / V*
+            if V_conv_mag > 0.01:
+                # Power injection into inverter
+                I_inv_complex = (Pf_voc + 1j*Qf_voc) / V_conv_mag
+                ig_a = I_inv_complex.real
+                ig_b = I_inv_complex.imag
+            else:
+                ig_a = 0.0
+                ig_b = 0.0
+            
+            # Call VOC dynamics
+            voc_dxdt = voc_meta['dynamics_fn'](voc_x, {'ig_a': ig_a, 'ig_b': ig_b}, voc_meta)
+            dxdt_voc.append(voc_dxdt)
 
         # Flatten all derivatives into a single vector (fully generic)
-        dxdt_flat = np.concatenate(dxdt_per_machine + dxdt_grid + dxdt_ren)
+        dxdt_flat = np.concatenate(dxdt_per_machine + dxdt_grid + dxdt_ren + dxdt_voc)
         return dxdt_flat
 
     def _get_param(self, core, name, default):

@@ -153,10 +153,22 @@ class PowerFlowSolver:
         # Slack power is calculated by solver
         
         # PV buses (generators with voltage control, excluding slack)
-        # Collect all generator buses first
+        # Collect all generator buses and VOC inverter buses
         gen_bus_to_pv = {}
         for pv in pv_list:
             gen_bus_to_pv[pv['bus']] = pv
+        
+        # Add VOC inverter buses as PV buses (they control voltage)
+        if hasattr(self.builder, 'ren_voc_metadata'):
+            for voc_meta in self.builder.ren_voc_metadata:
+                voc_bus = voc_meta['bus']
+                # Create a PV entry for the VOC inverter
+                gen_bus_to_pv[voc_bus] = {
+                    'bus': voc_bus,
+                    'p0': voc_meta['Pref'],
+                    'q0': voc_meta['Qref'],
+                    'v0': voc_meta['u_ref']
+                }
         
         for pv in pv_list:
             bus_idx = pv['bus']
@@ -184,6 +196,18 @@ class PowerFlowSolver:
                         self.pv_buses.append(i)
                         self.P_spec[i] += 0.7  # Default 0.7 pu generation
                         self.V[i] = 1.0
+        
+        # Check for VOC inverters (they act as PV buses - voltage controlled generation)
+        if hasattr(self.builder, 'ren_voc_metadata'):
+            for voc_meta in self.builder.ren_voc_metadata:
+                bus_idx = voc_meta['bus']
+                if bus_idx != slack_bus_idx:
+                    i = self.bus_idx_map[bus_idx]
+                    # Only add if not already classified as PV
+                    if i not in self.pv_buses:
+                        self.pv_buses.append(i)
+                        self.P_spec[i] += voc_meta['Pref']  # VOC generation
+                        self.V[i] = voc_meta['u_ref']
         
         # PQ buses (load buses)
         for pq in pq_list:
@@ -1642,10 +1666,61 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
                     ren_state_lists[i][offset] = Pe_final  # Pef
     
     # ========================================================================
+    # PART 4B: INITIALIZE VOC INVERTERS (Grid-Forming Virtual Oscillator Control)
+    # ========================================================================
+    n_voc = len(builder.ren_voc) if hasattr(builder, 'ren_voc') else 0
+    voc_state_lists = []
+    
+    if n_voc > 0 and verbose:
+        print(f"\nInitializing {n_voc} VOC inverter(s)...")
+    
+    for v in range(n_voc):
+        voc_meta = builder.ren_voc_metadata[v]
+        bus_idx = voc_meta['bus']
+        
+        # Get voltage and angle from power flow at VOC bus
+        # Lookup from system bus data (updated by power flow)
+        if bus_idx in bus_data:
+            V_bus = bus_data[bus_idx].get('v0', 1.03)
+            theta_bus = bus_data[bus_idx].get('a0', 0.0)
+        else:
+            V_bus = 1.03
+            theta_bus = 0.0
+        
+        # Get power setpoint from PV bus data or VOC metadata
+        pv_entries = {p['bus']: p for p in builder.system_data.get('PV', [])}
+        if bus_idx in pv_entries:
+            P_set = pv_entries[bus_idx].get('p0', voc_meta['Pref'])
+            Q_set = pv_entries[bus_idx].get('q0', voc_meta['Qref'])
+        else:
+            P_set = voc_meta['Pref']
+            Q_set = voc_meta['Qref']
+        
+        # Initialize VOC states: [u_mag, theta, Pf, Qf]
+        # At equilibrium, terminal voltage matches bus voltage from power flow
+        u_mag_init = V_bus
+        theta_init = theta_bus
+        Pf_init = P_set
+        Qf_init = Q_set
+        
+        voc_states = np.array([u_mag_init, theta_init, Pf_init, Qf_init])
+        voc_state_lists.append(voc_states)
+        
+        # Update VOC metadata references to match initialization
+        voc_meta['Pref'] = P_set
+        voc_meta['Qref'] = Q_set
+        voc_meta['u_ref'] = V_bus  # Track actual operating voltage
+        
+        if verbose:
+            print(f"  VOC {v+1} ({voc_meta['idx']}) at Bus {bus_idx}:")
+            print(f"    V = {u_mag_init:.4f} pu, theta = {np.rad2deg(theta_init):.2f} deg")
+            print(f"    P = {Pf_init:.4f} pu, Q = {Qf_init:.4f} pu")
+    
+    # ========================================================================
     # PART 5: ASSEMBLE FINAL STATE VECTOR (fully generic)
     # ========================================================================
-    # Concatenate all machine state vectors, grid state vectors, and renewable state vectors
-    all_states = machine_state_lists + grid_state_lists + ren_state_lists
+    # Concatenate all machine state vectors, grid state vectors, renewable state vectors, and VOC state vectors
+    all_states = machine_state_lists + grid_state_lists + ren_state_lists + voc_state_lists
     x0 = np.concatenate(all_states) if all_states else np.array([])
     
     if verbose:
@@ -1661,6 +1736,9 @@ def build_initial_state_vector(builder, coordinator, verbose=True):
         if n_ren > 0:
             total_ren_states = sum(len(r) for r in ren_state_lists)
             print(f"  Renewable states: {total_ren_states} ({n_ren} WT3 units)")
+        if n_voc > 0:
+            total_voc_states = sum(len(v) for v in voc_state_lists)
+            print(f"  VOC inverter states: {total_voc_states} ({n_voc} VOC units)")
         print("\n" + "="*80)
         print("  INITIAL CONDITIONS COMPLETE")
         print("="*80)

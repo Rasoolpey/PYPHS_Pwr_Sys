@@ -13,8 +13,8 @@ from utils.fault_sim_modular import ModularFaultSimulator
 def main():
     print("\n" + "="*80)
     print("  IEEE 14-BUS + VOC INVERTER - FAULT SIMULATION")
-    print("  Virtual Oscillator Control with P-f Droop (mp=0.05 → H_virtual≈3.2s)")
-    print("  Fault: Bus 9, 50ms duration, Z=0.01j Ω")
+    print("  Virtual Oscillator Control with P-f Droop (mp=0.05, H_virtual~3.2s)")
+    print("  Fault: Bus 9, 50ms duration, Z=0.01j ohm")
     print("="*80)
 
     system_json = "test_cases/ieee14bus/renewable_resources_adoption/ieee14_voc_system.json"
@@ -34,8 +34,8 @@ def main():
         print(f"    - VOC Virtual Inertia: {total_voc_inertia:.1f} MWs/MVA")
         print(f"    - Effective Total Inertia: {sim.M_total + total_voc_inertia:.1f} MWs/MVA")
         print(f"\n  Expected Improvement vs GFL:")
-        print(f"    - GFL (WT3):  M_eff = 41.0 MWs/MVA, CCT ≈ 50ms")
-        print(f"    - VOC:        M_eff = {sim.M_total + total_voc_inertia:.1f} MWs/MVA, CCT ≈ 75-80ms (estimated)")
+        print(f"    - GFL (WT3):  M_eff = 41.0 MWs/MVA, CCT ~ 50ms")
+        print(f"    - VOC:        M_eff = {sim.M_total + total_voc_inertia:.1f} MWs/MVA, CCT ~ 75-80ms (estimated)")
 
     # Initialize with power flow
     print("\n[2/4] Initializing with power flow...")
@@ -71,10 +71,10 @@ def main():
     print(f"  Time points: {len(sol.t)}")
     print(f"  Final time: {sol.t[-1]:.2f}s")
     if sol.t[-1] >= t_end - 0.1:
-        print(f"  Status: ✓ STABLE - System maintained synchronism")
+        print(f"  Status: [STABLE] - System maintained synchronism")
         print(f"  VOC virtual inertia helped system ride through the fault!")
     else:
-        print(f"  Status: ✗ UNSTABLE - System lost synchronism at t={sol.t[-1]:.2f}s")
+        print(f"  Status: [UNSTABLE] - System lost synchronism at t={sol.t[-1]:.2f}s")
         print(f"  Consider: Increase droop gain (mp) for more virtual inertia")
     print("="*80)
 
