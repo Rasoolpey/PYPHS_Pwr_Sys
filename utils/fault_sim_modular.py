@@ -461,6 +461,35 @@ class ModularFaultSimulator:
         )
         Id, Iq, Vd, Vq, V_ren = result
 
+        # ========================================================================
+        # CENTER OF INERTIA (COI) FREQUENCY CALCULATION
+        # ========================================================================
+        # To prevent collective drift, we enforce that the COI frequency stays at
+        # exactly 1.0 pu by removing any net acceleration.
+        # 
+        # The COI reference frame constraint: Σ(Mi * omegai) = M_total * omega_ref
+        # where omega_ref = 1.0 (synchronous reference)
+        #
+        # This means: d/dt[Σ(Mi * omegai)] = 0
+        # Which requires: Σ(dpi/dt) = 0
+        omega_list = []
+        M_list = []
+        for i in range(self.n_gen):
+            gen_meta_dict = self.builder.gen_metadata[i]
+            M_i = gen_meta_dict['M']
+            p_i = gen_states[i][1]
+            omega_i = p_i / M_i
+            omega_list.append(omega_i)
+            M_list.append(M_i)
+        
+        M_total = sum(M_list)
+        if M_total > 0:
+            # COI frequency: weighted average of all generator frequencies
+            omega_coi = sum(M_i * omega_i for M_i, omega_i in zip(M_list, omega_list)) / M_total
+        else:
+            # No inertia: use synchronous reference
+            omega_coi = 1.0
+
         # Component dynamics - fully generic, works with any component state counts
         dxdt_per_machine = []  # List of derivative vectors, one per machine
 
@@ -521,6 +550,15 @@ class ModularFaultSimulator:
                 genbuf[2] = Vd[i]; genbuf[3] = Vq[i]
                 genbuf[4] = Tm; genbuf[5] = Efd
                 gen_dxdt = jd['gen_dyn_jit'][i](gen_x, genbuf, gen_meta_arr)
+                
+                # Apply COI correction to rotor angle and momentum derivatives
+                # This prevents collective drift in multi-machine systems
+                omega_b_jit = gen_meta_arr[3]  # omega_b is at index 3
+                D_jit = gen_meta_arr[1]  # D is at index 1
+                gen_dxdt[0] = omega_b_jit * (omega - omega_coi)
+                # Correct damping term: D * (omega - omega_ref) where omega_ref = omega_coi
+                Te = Vd[i] * Id[i] + Vq[i] * Iq[i]
+                gen_dxdt[1] = Tm - Te - D_jit * (omega - omega_coi)
 
                 # Exciter dynamics via JIT (reuse exc_ports_buf already filled)
                 exc_dyn_fn = jd['exc_dyn_jit'][i]
@@ -565,6 +603,15 @@ class ModularFaultSimulator:
                     'Tm': Tm, 'Efd': Efd
                 }
                 gen_dxdt = gen_core._dynamics_fn(gen_x, gen_ports, gen_meta)
+                
+                # Apply COI correction to rotor angle and momentum derivatives
+                # This prevents collective drift in multi-machine systems
+                omega_b = gen_meta['omega_b']
+                D = gen_meta['D']
+                gen_dxdt[0] = omega_b * (omega - omega_coi)
+                # Correct damping term: D * (omega - omega_ref) where omega_ref = omega_coi
+                Te = Vd[i] * Id[i] + Vq[i] * Iq[i]
+                gen_dxdt[1] = Tm - Te - D * (omega - omega_coi)
 
                 exc_ports = {
                     'Vt': Vt, 'Vd': Vd[i], 'Vq': Vq[i],
@@ -577,6 +624,26 @@ class ModularFaultSimulator:
             # Assemble derivative vector for this machine (generic - handles any state count)
             machine_dxdt = np.concatenate([gen_dxdt, exc_dxdt, gov_dxdt])
             dxdt_per_machine.append(machine_dxdt)
+
+        # ========================================================================
+        # ENFORCE COI CONSTRAINT: d(omega_COI)/dt = 0
+        # ========================================================================
+        # The COI frequency must remain at 1.0 to prevent collective drift.
+        # We achieve this by ensuring Σ(dpi/dt) = 0.
+        # 
+        # Calculate net momentum acceleration
+        if M_total > 0 and self.n_gen > 0:
+            net_dp_dt = sum(dxdt_per_machine[i][1] for i in range(self.n_gen))  # Sum of all dp/dt
+            net_accel_coi = net_dp_dt / M_total  # Net COI acceleration
+            
+            # If there's net acceleration, remove it by adjusting each generator's dp/dt
+            # proportionally to their inertia (so larger machines contribute more to correction)
+            if abs(net_accel_coi) > 1e-16:
+                for i in range(self.n_gen):
+                    M_i = M_list[i]
+                    # Subtract the proportional share of net acceleration
+                    correction = M_i * net_accel_coi
+                    dxdt_per_machine[i][1] -= correction
 
         # Grid dynamics - maintain constant voltage (generic for any grid state count)
         dxdt_grid = []
