@@ -10,10 +10,61 @@ import json
 import numpy as np
 from scipy.integrate import solve_ivp
 import matplotlib.pyplot as plt
+from numba import njit
 from utils.system_builder import PowerSystemBuilder
 from utils.system_coordinator import PowerSystemCoordinator
 from utils.power_flow import run_power_flow
 from utils.numba_kernels import prepare_jit_data, warmup_jit
+
+
+@njit(cache=True)
+def apply_coi_constraint_jit(dp_dt_array, M_array, M_total):
+    """
+    Apply COI constraint to ensure zero net acceleration (in-place modification).
+    
+    Args:
+        dp_dt_array: Array of dp/dt values for all generators [n_gen] (modified in-place)
+        M_array: Array of inertia constants [n_gen]
+        M_total: Total inertia
+    """
+    n_gen = len(dp_dt_array)
+    
+    # Calculate net momentum acceleration
+    net_dp_dt = 0.0
+    for i in range(n_gen):
+        net_dp_dt += dp_dt_array[i]
+    
+    # If there's net acceleration, remove it proportionally to inertia
+    if abs(net_dp_dt) > 1e-16:
+        inv_M_total = 1.0 / M_total  # Compute once
+        for i in range(n_gen):
+            # Each generator contributes proportionally to its inertia
+            correction = M_array[i] * net_dp_dt * inv_M_total
+            dp_dt_array[i] -= correction
+
+
+@njit(cache=True)
+def compute_omega_coi_jit(p_array, M_array, M_total):
+    """
+    Compute Center of Inertia (COI) frequency.
+    
+    Args:
+        p_array: Array of momentum states [n_gen]
+        M_array: Array of inertia constants [n_gen]
+        M_total: Total inertia
+    
+    Returns:
+        omega_coi: Inertia-weighted average frequency
+    """
+    n_gen = len(p_array)
+    omega_coi = 0.0
+    
+    for i in range(n_gen):
+        omega_i = p_array[i] / M_array[i]
+        omega_coi += M_array[i] * omega_i
+    
+    omega_coi /= M_total
+    return omega_coi
 
 
 class ModularFaultSimulator:
@@ -86,6 +137,14 @@ class ModularFaultSimulator:
 
         # Base frequency
         self.omega_b = 2 * np.pi * 60
+
+        # Pre-compute inertia array for COI calculations (used in JIT path)
+        self.M_array = np.array([self.builder.gen_metadata[i]['M'] for i in range(self.n_gen)])
+        self.M_total = np.sum(self.M_array)
+        
+        # Pre-allocate buffers for COI calculations (avoid array creation in hot loop)
+        self._p_buffer = np.zeros(self.n_gen)  # Buffer for momentum states
+        self._dp_dt_buffer = np.zeros(self.n_gen)  # Buffer for dp/dt values
 
         # Load simulation configuration
         self._load_simulation_config(simulation_json)
@@ -462,32 +521,17 @@ class ModularFaultSimulator:
         Id, Iq, Vd, Vq, V_ren = result
 
         # ========================================================================
-        # CENTER OF INERTIA (COI) FREQUENCY CALCULATION
+        # CENTER OF INERTIA (COI) FREQUENCY CALCULATION (JIT-optimized)
         # ========================================================================
-        # To prevent collective drift, we enforce that the COI frequency stays at
-        # exactly 1.0 pu by removing any net acceleration.
-        # 
-        # The COI reference frame constraint: Σ(Mi * omegai) = M_total * omega_ref
-        # where omega_ref = 1.0 (synchronous reference)
-        #
-        # This means: d/dt[Σ(Mi * omegai)] = 0
-        # Which requires: Σ(dpi/dt) = 0
-        omega_list = []
-        M_list = []
-        for i in range(self.n_gen):
-            gen_meta_dict = self.builder.gen_metadata[i]
-            M_i = gen_meta_dict['M']
-            p_i = gen_states[i][1]
-            omega_i = p_i / M_i
-            omega_list.append(omega_i)
-            M_list.append(M_i)
-        
-        M_total = sum(M_list)
-        if M_total > 0:
-            # COI frequency: weighted average of all generator frequencies
-            omega_coi = sum(M_i * omega_i for M_i, omega_i in zip(M_list, omega_list)) / M_total
+        # Use pre-allocated buffer to avoid array creation overhead
+        if self.M_total > 0 and self.n_gen > 0:
+            # Fill buffer with momentum states (fastest way - direct indexing)
+            for i in range(self.n_gen):
+                self._p_buffer[i] = gen_states[i][1]
+            
+            # Compute COI frequency using JIT function
+            omega_coi = compute_omega_coi_jit(self._p_buffer, self.M_array, self.M_total)
         else:
-            # No inertia: use synchronous reference
             omega_coi = 1.0
 
         # Component dynamics - fully generic, works with any component state counts
@@ -626,24 +670,20 @@ class ModularFaultSimulator:
             dxdt_per_machine.append(machine_dxdt)
 
         # ========================================================================
-        # ENFORCE COI CONSTRAINT: d(omega_COI)/dt = 0
+        # ENFORCE COI CONSTRAINT: d(omega_COI)/dt = 0 (JIT-optimized)
         # ========================================================================
-        # The COI frequency must remain at 1.0 to prevent collective drift.
-        # We achieve this by ensuring Σ(dpi/dt) = 0.
-        # 
-        # Calculate net momentum acceleration
-        if M_total > 0 and self.n_gen > 0:
-            net_dp_dt = sum(dxdt_per_machine[i][1] for i in range(self.n_gen))  # Sum of all dp/dt
-            net_accel_coi = net_dp_dt / M_total  # Net COI acceleration
+        # Use pre-allocated buffer to avoid array creation overhead
+        if self.M_total > 0 and self.n_gen > 0:
+            # Fill buffer with dp/dt values (fastest way - direct indexing)
+            for i in range(self.n_gen):
+                self._dp_dt_buffer[i] = dxdt_per_machine[i][1]
             
-            # If there's net acceleration, remove it by adjusting each generator's dp/dt
-            # proportionally to their inertia (so larger machines contribute more to correction)
-            if abs(net_accel_coi) > 1e-16:
-                for i in range(self.n_gen):
-                    M_i = M_list[i]
-                    # Subtract the proportional share of net acceleration
-                    correction = M_i * net_accel_coi
-                    dxdt_per_machine[i][1] -= correction
+            # Apply constraint using JIT function (modifies buffer in-place)
+            apply_coi_constraint_jit(self._dp_dt_buffer, self.M_array, self.M_total)
+            
+            # Write corrected values back
+            for i in range(self.n_gen):
+                dxdt_per_machine[i][1] = self._dp_dt_buffer[i]
 
         # Grid dynamics - maintain constant voltage (generic for any grid state count)
         dxdt_grid = []
@@ -1064,6 +1104,8 @@ class ModularFaultSimulator:
         """Run simulation"""
         fault_msg = f"fault @ Bus {self.fault_bus}, t={self.fault_start}-{self.fault_start + self.fault_duration}s" if self.fault_enabled else "no fault"
         print(f"\nSimulating {t_end}s, {fault_msg}")
+        if self.fault_enabled:
+            print(f"  Solver: Radau with max_step=1ms (prevents excessive refinement during fault)")
 
         # Prepare JIT-compiled dynamics (pack metadata into arrays, warmup)
         if use_jit and self.n_gen > 0:
@@ -1122,12 +1164,25 @@ class ModularFaultSimulator:
             return 1
         monitor.terminal = False
 
+        # Determine solver method and parameters
+        # For fault simulations, use Radau (better for stiff systems) with max_step
+        # to prevent solver from taking infinitesimally small steps
+        if self.fault_enabled:
+            solver_method = 'Radau'
+            # Limit max step to prevent excessive refinement during fault
+            # Typical fault duration is 0.1s, so max_step=0.001 gives 100 steps across fault
+            max_step = 0.001  # 1 millisecond maximum step size
+        else:
+            solver_method = 'RK45'
+            max_step = np.inf  # No limit for normal operation
+        
         sol = solve_ivp(
             self.dynamics,
             (0, t_end),
             x0.flatten(),
             t_eval=np.linspace(0, t_end, n_points),
-            method='RK45',
+            method=solver_method,
+            max_step=max_step,
             rtol=1e-6,
             atol=1e-8,
             events=monitor
