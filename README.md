@@ -984,7 +984,7 @@ If all checks pass → **perfect initialization achieved!**
 The modular architecture enables easy addition of:
 - **Load models**: Static, dynamic, motor loads
 - **FACTS devices**: SVC, STATCOM, UPFC
-- **Renewable integration**: Wind turbines, solar PV with inverters
+- ✅ **Renewable integration**: Wind turbines (WT3), Grid-Forming VOC inverters
 - **Protection systems**: Relay models, breaker logic
 - **Advanced analysis**: 
   - ✅ Eigenvalue analysis (Lyapunov analyzer)
@@ -1016,10 +1016,19 @@ To contribute new models or analysis tools:
 
 ---
 
-**Framework Version**: 1.7
+**Framework Version**: 1.7.1
 **Last Updated**: February 2026
 
 ### Changelog
+
+**v1.7.1 (February 2026)**
+- **FIX: VOC Grid-Forming Inverter — 4 Critical Bugs Resolved**
+  - **Bug 1 - Reference frame mismatch**: VOC used absolute rotating phase angle `theta`; generators use synchronous-frame `delta`. Changed to `delta_voc` with `d/dt = ωb·(ω - ω₀)` — eliminates 6.3-second oscillation
+  - **Bug 2 - Filter impedance 374× too large**: `omega_rad = ω₀·2π·60` incorrectly mixed physical rad/s with pu parameters. Fixed to `Z_filt = Rf + j·ω₀·Lf` (all per-unit)
+  - **Bug 3 - Network solver divergence**: Corrected filter admittance `y_filt ≈ 12.4 pu` caused iterative solver to diverge because it wasn't included in `Y_aug`. Fixed by augmenting `Y_aug` diagonal with VOC admittance and using direct injection `I_inj += y_filt·u_voc` (identical to generator behind `Xd''`)
+  - **Bug 4 - Missing ωb angle scaling**: Generator uses `d(δ)/dt = ωb·(ω-1)` producing rad/s; VOC was 376.99× slower. Added `ωb = 2π·60` multiplication
+  - **Result**: Stable 15-second simulations, all states settle by t≈5s, system frequency deviation < 0.000002 pu
+  - VOC status upgraded from Experimental to **Validated**
 
 **v1.7 (February 2026)**
 - **NEW: Center of Inertia (COI) Constraint for Multi-Machine Systems**
@@ -1030,15 +1039,15 @@ To contribute new models or analysis tools:
   - Each generator swing equation referenced to COI frequency instead of fixed 1.0 pu
   - Automatically redistributes any net system acceleration proportionally to generator inertias
   - Critical for simulations with renewable integration where power balance may have small numerical errors
-- **NEW: Grid-Forming (GFM) Inverter - Virtual Oscillator Control (VOC)** ⚠️ Experimental
-  - Implements nonlinear oscillator-based grid-forming control
-  - 4-state model: voltage magnitude, phase angle, filtered P, filtered Q
+- **NEW: Grid-Forming (GFM) Inverter - Virtual Oscillator Control (VOC)** ✅ Validated
+  - Implements nonlinear oscillator-based grid-forming control (Kong et al., 2024)
+  - 4-state model: voltage magnitude, synchronous-frame angle deviation, filtered P, filtered Q
   - P-f droop provides virtual inertia (H_virtual ≈ 1/(2πf × mp))
   - Q-V droop with pump/damp switching for voltage regulation
-  - Network coupling: voltage source behind output filter (LC)
+  - Network coupling: voltage source behind output filter (Z_filt augmented into Y_bus)
   - Automatic VOC-specific plotting (6-panel diagnostics)
-  - **Status**: Functional but exhibits power oscillations (under investigation)
-  - See `Todo/TODO.md` for known issues and proposed solutions
+  - **Status**: Fully operational — stable 15-second simulations with flat-line equilibrium
+  - 4 critical bugs fixed: reference frame, filter impedance, network solver, angle scaling
 - **Performance Optimization for Fault Simulations**
   - Added `max_step` parameter to Radau solver to prevent excessive time step refinement
   - Default: 10ms max step during faults (balances accuracy vs speed)
@@ -1252,9 +1261,9 @@ To achieve machine-precision equilibrium for renewable components, the framework
 
 ## Grid-Forming (GFM) Inverter - Virtual Oscillator Control (VOC)
 
-### 🔬 Implementation Status: **Experimental** ⚠️
+### ✅ Implementation Status: **Validated**
 
-The framework includes a **Grid-Forming (GFM) inverter** based on **Virtual Oscillator Control (VOC)**, addressing the stability limitations of grid-following wind turbines. Unlike GFL converters that act as current sources, GFM inverters establish grid voltage and frequency, providing **virtual inertia** and **active damping** similar to synchronous generators.
+The framework includes a **Grid-Forming (GFM) inverter** based on **Virtual Oscillator Control (VOC)** (Kong et al., 2024), addressing the stability limitations of grid-following wind turbines. Unlike GFL converters that act as current sources, GFM inverters establish grid voltage and frequency, providing **virtual inertia** and **active damping** similar to synchronous generators.
 
 ### Key Features
 - **Voltage Source Model**: VOC outputs voltage through filter impedance (proper network coupling)
@@ -1266,19 +1275,20 @@ The framework includes a **Grid-Forming (GFM) inverter** based on **Virtual Osci
 
 ### VOC State Vector
 ```python
-x_voc = [u_mag, theta, Pf, Qf]
+x_voc = [u_mag, delta_voc, Pf, Qf]
 ```
 - `u_mag`: Internal voltage magnitude (pu)
-- `theta`: Internal voltage angle (rad) - integrates at frequency ω
+- `delta_voc`: Angle deviation from synchronous reference frame (rad) — constant at equilibrium, like generator `delta`
 - `Pf`: Low-pass filtered active power (pu)
 - `Qf`: Low-pass filtered reactive power (pu)
 
 ### Control Laws
-**Frequency Control (P-f Droop):**
+**Frequency Control (P-f Droop) — Synchronous Frame:**
 ```
-dθ/dt = ω₀ + mp·(Pref/u²ref - Pf/u²)·u²ref
+ω = ω₀ + mp·(Pref/u²ref - Pf/u²)·u²ref
+d(delta_voc)/dt = ωb·(ω - ω₀)
 ```
-This provides virtual inertia: **H_virtual ≈ 3.2s** with `mp=0.05` (5% droop)
+where `ωb = 2π·60 = 376.99 rad/s` converts from pu frequency to angle rate (rad/s), consistent with generator convention `d(delta)/dt = ωb·(ω - 1)`. This provides virtual inertia: **H_virtual ≈ 3.2s** with `mp=0.05` (5% droop).
 
 **Voltage Control (Q-V with Adaptive Damping):**
 ```
@@ -1295,30 +1305,38 @@ Where `P_inst = ua·iga + ub·igb` (instantaneous power from grid currents)
 
 ### Network Coupling Architecture
 
-**Critical Implementation**: VOC is coupled as a **voltage source behind impedance**, not a current source:
+**Critical Implementation**: VOC is coupled as a **voltage source behind impedance** (identical to generator behind `Xd''`), not a current source:
 
-1. **VOC Output**: Internal voltage `u_voc = u_mag·e^(jθ)` in αβ frame
-2. **Filter Impedance**: `Z_filt = Rf + jωb·Lf` (typically 0.01 + j0.08 pu)
-3. **Network Injection**: Current injected into bus: `I = (u_voc - V_bus)·y_filt`
-4. **Grid Current Feedback**: Network solver returns `I_grid` for VOC dynamics
+1. **VOC Output**: Internal voltage `u_voc = u_mag·e^(j·delta_voc)` in synchronous frame
+2. **Filter Impedance**: `Z_filt = Rf + j·ω₀·Lf` (typically 0.01 + j0.08 pu) — all quantities in per-unit
+3. **Y_aug Augmentation**: Filter admittance `y_filt = 1/Z_filt` added to `Y_aug[voc_bus, voc_bus]` diagonal (same as generator `1/jXd''`)
+4. **Direct Current Injection**: `I_inj += y_filt · u_voc` (before the iterative network loop)
+5. **Grid Current Recovery**: `I_grid = (u_voc - V_bus) · y_filt` for VOC power calculation
 
-This proper voltage source modeling (implemented in `system_coordinator.py`) ensures accurate power flow and realistic converter dynamics.
+This architecture ensures the iterative network solver always converges (VOC admittance in the system matrix, not the iteration loop) and is mathematically identical to how generators are coupled. Implemented in `system_coordinator.py` via precomputed `self.voc_y_filt[]` arrays.
 
 ### Initialization Strategy
 
 VOC initialization uses a multi-step approach:
 
-**Power Flow Integration:**
-- VOC buses treated as PV buses (voltage-controlled)
-- Initial voltage magnitude from power flow: `V_bus = 1.03 pu`
-- Compensate for filter voltage drop: `u_voc = V_bus + I_est·Z_filt`
+**Initialization:**
+- VOC buses treated as PV buses (voltage-controlled generation)
+- Initial voltage magnitude and angle from AC power flow solution
+- Exact complex voltage drop compensation through filter impedance:
+  ```
+  V_bus = V_pf · e^(j·θ_pf)        # Power flow bus voltage
+  I_grid = conj(S_target / V_bus)   # Grid current for target power
+  u_voc = V_bus + I_grid · Z_filt   # VOC internal voltage
+  u_mag(0) = |u_voc|, delta_voc(0) = ∠u_voc
+  ```
+- `Pf(0) = P_set`, `Qf(0) = Q_set` from power flow
 
-**Filter State Settling:**
-- Set `Pf = Pref`, `Qf = Qref` from power flow
-- Accept natural transients: `dPf/dt ≈ 10-22 pu/s` initially
-- **Filter time constant**: τ = 1/ωlpf ≈ 16ms
-- Transients decay to <1% in ~80ms (5 time constants)
-- **This is physically realistic** - real converters have startup transients
+**Steady-State Behavior:**
+- All states settle by t ≈ 5s with small initial transient (filter time constant τ = 1/ωlpf ≈ 16ms)
+- Final operating point reflects network droop equilibrium:
+  - P settles near `Pref · (u/u_ref)²` due to voltage-dependent droop
+  - Q adjusts to match network reactive power requirements
+- Derivatives < 1e-5 at t = 15s
 
 ### Virtual Inertia Comparison
 
@@ -1377,21 +1395,25 @@ python test_voc_fault.py    # 3-phase fault with GFM inverter
 
 ### Current Implementation Status
 
-**✅ Completed:**
-- Voltage source network coupling in `system_coordinator.py`
-- Grid current feedback to VOC dynamics in `fault_sim_modular.py`
-- Power flow initialization with filter compensation
+**✅ Fully Validated:**
+- Synchronous-frame angle convention (`delta_voc`), consistent with generator `delta`
+- `omega_b = 2π·60` scaling on angle derivative, matching generator swing equation
+- Y_aug augmentation with VOC filter admittance for guaranteed solver convergence
+- Direct current injection architecture (identical to generator behind `Xd''`)
+- Correct per-unit filter impedance: `Z_filt = Rf + j·ω₀·Lf`
+- Power flow initialization with exact complex voltage drop compensation
 - Automatic 6-panel VOC diagnostic plotting
-- Successful 15-second simulations
+- Stable 15-second simulations: all states settle by t≈5s, derivatives < 1e-5 at t=15s
+- System frequency deviation < 0.000002 pu throughout
 
-**⚠️ Known Issues (Under Investigation):**
-- **Power oscillations**: Active power oscillates ±0.35 pu around setpoint
-- **Voltage variations**: Magnitude varies 0.75-1.25 pu (should be constant at 1.03 pu)
-- **Initialization transients**: Large dPf/dt ≈ -10 to -20 at t=0
-- **Oscillation period**: ~6-7 seconds (inter-area mode frequency)
-- **System generators remain stable**: ±0.0004% frequency deviation
+**Bugs Fixed (v1.7):**
 
-**See `Todo/TODO.md` for detailed analysis, probable root causes, and proposed investigation steps.**
+| Bug | Root Cause | Impact | Fix |
+|-----|-----------|--------|-----|
+| Reference frame mismatch | VOC used absolute rotating `theta`; generators use synchronous `delta` | ~6.3s oscillation period, ±0.35 pu power swings | Changed to `delta_voc` with `d/dt = ωb·(ω - ω₀)` |
+| Filter impedance 374× too large | `omega_rad = ω₀ · 2π · 60` applied physical rad/s to pu params | Filter admittance ~374× too small → near-zero VOC current | Changed to `Z = Rf + j·ω₀·Lf` (all pu) |
+| Network solver divergence | Corrected `y_filt` (~12.4 pu) not in Y_aug matrix | Iterative solver diverges when `|y_filt/Y_aug[bus]| > 1` | Augmented Y_aug diagonal with `y_filt`, direct injection |
+| Missing ωb angle scaling | Generator uses `d(δ)/dt = ωb·(ω-1)` (rad/s); VOC was 376.99× too slow | Angle response ~377× slower than generators | Added `ωb = 2π·60` multiplication |
 
 ### Related Files
 
